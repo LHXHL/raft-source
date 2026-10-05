@@ -11,7 +11,6 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
-import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const projectDir = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
@@ -83,9 +82,11 @@ test("a malformed or non-floor range stays unparsed so the contract fails closed
 
 test("a floor NEWER than the repository pin is rejected, including same-major", () => {
   // The regression this pins: comparing majors alone accepts both of these.
-  assert.equal(floorSatisfiedByPin(">=24.16.0"), false, "a newer minor must be refused");
-  assert.equal(floorSatisfiedByPin(">=24.15.1"), false, "a newer patch must be refused");
-  assert.equal(floorSatisfiedByPin(">=25"), false, "a newer major must be refused");
+  // Derived from the pin so a routine Node bump does not have to edit this test.
+  const [major, minor, patch] = pinTriple();
+  assert.equal(floorSatisfiedByPin(`>=${major}.${minor + 1}.0`), false, "a newer minor must be refused");
+  assert.equal(floorSatisfiedByPin(`>=${major}.${minor}.${patch + 1}`), false, "a newer patch must be refused");
+  assert.equal(floorSatisfiedByPin(`>=${major + 1}`), false, "a newer major must be refused");
 });
 
 /**
@@ -128,8 +129,9 @@ test("a malformed active version or floor fails closed", () => {
 });
 
 test("the authoritative floor is satisfied by the repository pin", () => {
+  const [major, minor, patch] = pinTriple();
   assert.equal(floorSatisfiedByPin(">=24.0.0"), true);
-  assert.equal(floorSatisfiedByPin(">=24.15.0"), true, "a floor equal to the pin is satisfiable");
+  assert.equal(floorSatisfiedByPin(`>=${major}.${minor}.${patch}`), true, "a floor equal to the pin is satisfiable");
 });
 
 function writeExecutable(path: string, source: string): void {
@@ -297,12 +299,12 @@ exit 0
   );
   writeExecutable(join(bin, "lsof"), "#!/bin/sh\nexit 1\n");
   writeExecutable(
-    join(bin, "npx"),
+    join(bin, "pnpm"),
     `#!/bin/sh
-if [ -n "\${RAFTDEV_FAKE_NPX_LOG:-}" ]; then
-  printf '%s\n' "$*" >> "$RAFTDEV_FAKE_NPX_LOG"
+if [ -n "\${RAFTDEV_FAKE_PNPM_LOG:-}" ]; then
+  printf '%s\n' "$*" >> "$RAFTDEV_FAKE_PNPM_LOG"
 fi
-if [ "$1" = "tsx" ] && [ "$2" = "scripts/seed.ts" ]; then
+if [ "$1" = "exec" ] && [ "$5" = "scripts/seed.ts" ]; then
   if [ "\${RAFTDEV_FAKE_SEED_KILL_PARENT:-0}" = "1" ]; then
     rm -f \${RAFTDEV_FAKE_REMOVE_BEFORE_KILL:-}
     kill -KILL "$PPID"
@@ -313,16 +315,16 @@ if [ "$1" = "tsx" ] && [ "$2" = "scripts/seed.ts" ]; then
     while :; do sleep 1; done
   fi
   status="\${RAFTDEV_FAKE_SEED_EXIT:-0}"
-  [ "$status" -eq 0 ] && printf '{"apiKey":"fake-machine-key"}\n' > "$4"
+  [ "$status" -eq 0 ] && printf '{"apiKey":"fake-machine-key"}\n' > "$7"
   exit "$status"
 fi
 exit 0
 `,
   );
-  writeExecutable(join(bin, "pnpm"), "#!/bin/sh\nexit 0\n");
+  writeExecutable(join(bin, "npx"), "#!/bin/sh\nexit 0\n");
 }
 
-test("raftdev rejects an unsupported Node before loading tsx or touching services", () => {
+test("raftdev rejects an unsupported Node before loading the TS loader or touching services", () => {
   withFakeBin((root, bin) => {
     const log = join(root, "node.log");
     writeExecutable(
@@ -349,7 +351,8 @@ exit 23
     assert.equal(child.status, 1);
     assert.match(child.stderr, /Node v18\.19\.1 is unsupported/);
     assert.match(child.stderr, /requires Node >=24/);
-    assert.match(child.stderr, /Install\/activate Node 24\.15\.0/);
+    const pin = readFileSync(join(projectDir, ".node-version"), "utf8").trim();
+    assert.ok(child.stderr.includes(`Install/activate Node ${pin}`), "raftdev must recommend the pinned Node");
     assert.deepEqual(readFileSync(log, "utf8").trim().split("\n"), [
       "--version",
     ]);
@@ -383,7 +386,7 @@ exit 23
     assert.equal(child.status, 23);
     assert.deepEqual(readFileSync(log, "utf8").trim().split("\n"), [
       "--version",
-      `--import tsx ${raftdevScript} status`,
+      `--import @oxc-node/core/register ${raftdevScript} status`,
     ]);
   });
 });
@@ -436,7 +439,7 @@ exit 1
 
     const child = spawnSync(
       process.execPath,
-      ["--import", "tsx", raftdevScript, "status"],
+      ["--import", "@oxc-node/core/register", raftdevScript, "status"],
       {
         cwd: projectDir,
         encoding: "utf8",
@@ -468,7 +471,7 @@ exit 1
 
     const child = spawnSync(
       process.execPath,
-      ["--import", "tsx", raftdevScript, "status"],
+      ["--import", "@oxc-node/core/register", raftdevScript, "status"],
       {
         cwd: projectDir,
         encoding: "utf8",
@@ -528,7 +531,7 @@ exit 1
 
     const child = spawnSync(
       process.execPath,
-      ["--import", "tsx", raftdevScript, "status"],
+      ["--import", "@oxc-node/core/register", raftdevScript, "status"],
       {
         cwd: projectDir,
         encoding: "utf8",
@@ -577,7 +580,7 @@ exit 1
 
     const child = spawnSync(
       process.execPath,
-      ["--import", "tsx", raftdevScript, "status"],
+      ["--import", "@oxc-node/core/register", raftdevScript, "status"],
       {
         cwd: projectDir,
         encoding: "utf8",
@@ -612,7 +615,7 @@ exit 0
 
     const child = spawnSync(
       process.execPath,
-      ["--import", "tsx", raftdevScript, "status"],
+      ["--import", "@oxc-node/core/register", raftdevScript, "status"],
       {
         cwd: projectDir,
         encoding: "utf8",
@@ -649,7 +652,7 @@ exit 0
 
     const child = spawnSync(
       process.execPath,
-      ["--import", "tsx", raftdevScript, "status"],
+      ["--import", "@oxc-node/core/register", raftdevScript, "status"],
       {
         cwd: projectDir,
         encoding: "utf8",
@@ -679,7 +682,7 @@ test("a seed failure preserves its exit code and removes every managed resource 
     try {
       const child = spawnSync(
         process.execPath,
-        ["--import", "tsx", raftdevScript, "start", "cleanup-tooth"],
+        ["--import", "@oxc-node/core/register", raftdevScript, "start", "cleanup-tooth"],
         {
           cwd: projectDir,
           encoding: "utf8",
@@ -771,7 +774,7 @@ test("start --with-onboarding forwards the deliberate fresh-owner fixture to see
   withFakeBin((root, bin) => {
     const dockerState = join(root, "docker.state");
     const tmuxState = join(root, "tmux.state");
-    const npxLog = join(root, "npx.log");
+    const pnpmLog = join(root, "pnpm.log");
     const environmentName = "with-onboarding-tooth";
     const environmentDir = join(projectDir, ".slockdev", environmentName);
     const seedFile = join(projectDir, `.dev-env-${environmentName}.json`);
@@ -788,7 +791,7 @@ test("start --with-onboarding forwards the deliberate fresh-owner fixture to see
           PATH: `${bin}:${process.env.PATH ?? ""}`,
           RAFTDEV_FAKE_DOCKER_STATE: dockerState,
           RAFTDEV_FAKE_TMUX_STATE: tmuxState,
-          RAFTDEV_FAKE_NPX_LOG: npxLog,
+          RAFTDEV_FAKE_PNPM_LOG: pnpmLog,
           SLOCKDEV_TRACE_WORKER: "0",
           SLOCKDEV_TUNNEL: "0",
           SLOCKDEV_IDLE_TTL_SECONDS: "0",
@@ -797,8 +800,8 @@ test("start --with-onboarding forwards the deliberate fresh-owner fixture to see
 
       assert.equal(child.status, 0, `${child.stdout}\n${child.stderr}`);
       assert.match(
-        readFileSync(npxLog, "utf8"),
-        new RegExp(`tsx scripts/seed\\.ts --output .*\\.dev-env-${environmentName}\\.json --with-onboarding`),
+        readFileSync(pnpmLog, "utf8"),
+        new RegExp(`exec node --import @oxc-node/core/register scripts/seed\\.ts --output .*\\.dev-env-${environmentName}\\.json --with-onboarding`),
       );
     } finally {
       rmSync(environmentDir, { recursive: true, force: true });
@@ -860,7 +863,7 @@ test("a required tmux launch failure is not reported as running and is cleaned",
     try {
       const child = spawnSync(
         process.execPath,
-        ["--import", "tsx", raftdevScript, "start", environmentName],
+        ["--import", "@oxc-node/core/register", raftdevScript, "start", environmentName],
         {
           cwd: projectDir,
           encoding: "utf8",
