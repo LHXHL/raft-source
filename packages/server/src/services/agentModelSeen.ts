@@ -41,6 +41,7 @@ export interface ApplyAgentModelSeenOptions {
 
 const MAX_SEQS_PER_ITEM = 2_000;
 
+
 /** Apply one conversation's report to the agent's read position. */
 export async function applyAgentModelSeen(input: {
   agentId: string;
@@ -49,6 +50,12 @@ export async function applyAgentModelSeen(input: {
   seqs: readonly number[];
 }, options: ApplyAgentModelSeenOptions = {}): Promise<AgentModelSeenOutcome> {
   const { agentId, channelId } = input;
+  // The conversation must belong to the agent's own server before anything is
+  // read for it; the access check alone admits other servers' public channels.
+  const channel = input.serverId ? await channelService.getChannel(channelId) : null;
+  if (!channel || channel.serverId !== input.serverId) {
+    return { outcome: "unchanged", reason: "no_access" };
+  }
   if (!await channelService.canAgentAccessChannel(channelId, agentId)) {
     return { outcome: "unchanged", reason: "no_access" };
   }
@@ -61,7 +68,7 @@ export async function applyAgentModelSeen(input: {
 
   // Joint conversations keep their rows under the canonical channel; the read
   // position stays keyed by this server's projection (as history reads do).
-  const storageChannelId = await resolveStorageChannelId(channelId, input.serverId);
+  const storageChannelId = await resolveStorageChannelId(channel, input.serverId);
   const rows = await getDb()
     .select({ seq: messages.seq, createdAt: messages.createdAt })
     .from(messages)
@@ -84,14 +91,17 @@ export async function applyAgentModelSeen(input: {
   return { outcome: "advanced", fromSeq: prior, toSeq: upTo };
 }
 
-async function resolveStorageChannelId(channelId: string, serverId: string | null): Promise<string> {
+async function resolveStorageChannelId(
+  channel: NonNullable<Awaited<ReturnType<typeof channelService.getChannel>>>,
+  serverId: string | null,
+): Promise<string> {
+  const channelId = channel.id;
   if (!serverId) return channelId;
-  const channel = await channelService.getChannel(channelId);
-  if (channel?.type === "thread") {
+  if (channel.type === "thread") {
     const projection = await channelService.getJointThreadProjectionByLocalThread(channelId, serverId);
     return projection?.canonicalThreadChannelId ?? channelId;
   }
-  if (channel?.type === "joint") {
+  if (channel.type === "joint") {
     const access = await channelService.resolveChannelAccess({ serverId, channelId });
     return access?.kind === "joint" ? access.canonicalChannelId : channelId;
   }

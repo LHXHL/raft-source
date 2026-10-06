@@ -203,8 +203,8 @@ export const RISINGWAVE_CDC_TABLES: readonly RisingWaveCdcTable[] = [
     primaryKey: ["receiver_type", "receiver_id", "target_kind", "target_channel_id"],
   },
   {
-    // The parent message's task in rw_followed_threads_v4 (072). Production
-    // carries the full table as `rw_tasks (*)`; this is the slice 072 reads.
+    // The parent message's task in rw_followed_threads_v5 (074). Production
+    // carries the full table as `rw_tasks (*)`; this is the slice 074 reads.
     upstream: "tasks",
     name: "rw_tasks",
     columns: [
@@ -240,7 +240,7 @@ export const RISINGWAVE_SERVER_READ_RELATIONS = [
   "rw_activity_totals_v4",
   "rw_agent_inbox_v5",
   "rw_conversation_unread_v2",
-  "rw_followed_threads_v4",
+  "rw_followed_threads_v5",
   "rw_target_latest_v4",
   "rw_target_eligible_v1",
   "rw_channels",
@@ -340,9 +340,11 @@ export const RISINGWAVE_BOOTSTRAP_ARTIFACTS: readonly RisingWaveBootstrapArtifac
   },
   {
     // The active followed-threads list in one row per thread: v3's stats plus
-    // the parent message and its task (rw_tasks). Reads rw_receiver_cursors_v1 (063).
-    file: "infra/risingwave/sql/072-followed-threads-v4.sql",
-    relations: ["rw_followed_threads_v4"],
+    // the parent message and its task (rw_tasks), joint projections included
+    // (canonical parent, local joint parent channel). Reads
+    // rw_receiver_cursors_v1 (063). Supersedes 072 (rw_followed_threads_v4).
+    file: "infra/risingwave/sql/074-followed-threads-v5.sql",
+    relations: ["rw_followed_threads_v5"],
   },
 ] as const;
 

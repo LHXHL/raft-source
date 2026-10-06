@@ -182,33 +182,43 @@ test("claude launch args do not pass chat-MCP config flags", () => {
   assert.ok(!args.includes("--runtime-actions-only"));
 });
 
-test("claude spawn spec uses shell for unresolved command on Windows", () => {
-  assert.deepEqual(buildClaudeSpawnSpec(null, "win32"), {
-    command: "claude",
-    shell: true,
-  });
-});
+test("claude spawn spec never uses a shell on Windows", () => {
+  const npmBin = "C:\\Users\\tester\\AppData\\Roaming\\npm";
+  const shim = `${npmBin}\\claude.cmd`;
+  const exe = `${npmBin}\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe`;
+  const args = ["--settings", JSON.stringify({ fastMode: true }), "--model", "opus & echo x"];
+  const deps = {
+    platform: "win32" as const,
+    existsSyncFn: (file: string) => file === shim || file === exe,
+    readFileSyncFn: () => 'CALL :find_dp0\r\n"%dp0%\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe"   %*\r\n',
+    windowsEnvironmentReaderFn: () => ({}),
+    execFileSyncFn: ((command: string) => {
+      assert.equal(command, "powershell.exe");
+      return Buffer.from(`${shim}\r\n`);
+    }) as any,
+  };
 
-test("claude spawn spec uses shell for Windows batch shims", () => {
-  assert.deepEqual(buildClaudeSpawnSpec("C:\\Users\\tester\\AppData\\Roaming\\npm\\claude.cmd", "win32"), {
-    command: "C:\\Users\\tester\\AppData\\Roaming\\npm\\claude.cmd",
-    shell: true,
-  });
-  assert.deepEqual(buildClaudeSpawnSpec("C:\\tools\\claude.BAT", "win32"), {
-    command: "C:\\tools\\claude.BAT",
-    shell: true,
-  });
-});
-
-test("claude spawn spec does not use shell for executable paths or non-Windows platforms", () => {
-  assert.deepEqual(buildClaudeSpawnSpec("C:\\tools\\claude.exe", "win32"), {
+  assert.deepEqual(buildClaudeSpawnSpec(shim, args, deps), { command: exe, args, shell: false });
+  assert.deepEqual(buildClaudeSpawnSpec(null, args, deps), { command: exe, args, shell: false });
+  assert.deepEqual(buildClaudeSpawnSpec("claude", args, deps), { command: exe, args, shell: false });
+  assert.deepEqual(buildClaudeSpawnSpec("C:\\tools\\claude.exe", args, deps), {
     command: "C:\\tools\\claude.exe",
+    args,
     shell: false,
   });
-  assert.deepEqual(buildClaudeSpawnSpec("/usr/local/bin/claude", "darwin"), {
+  assert.throws(
+    () => buildClaudeSpawnSpec("C:\\tools\\claude.BAT", args, { ...deps, readFileSyncFn: () => "@echo off\r\n" }),
+    /batch wrapper/,
+  );
+});
+
+test("claude spawn spec passes the command through off Windows", () => {
+  assert.deepEqual(buildClaudeSpawnSpec("/usr/local/bin/claude", ["--model", "opus"], { platform: "darwin" }), {
     command: "/usr/local/bin/claude",
+    args: ["--model", "opus"],
     shell: false,
   });
+  assert.deepEqual(buildClaudeSpawnSpec(null, [], { platform: "linux" }), { command: "claude", args: [], shell: false });
 });
 
 test("resolveClaudeCommand falls back to Claude Desktop URL handler on macOS", () => {

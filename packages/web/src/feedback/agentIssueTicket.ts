@@ -13,8 +13,8 @@ import { isElectronDesktopShell } from "../utils/desktopShell";
 // touch the user's message (which is capped at 10,000 chars server- and client-side),
 // and needs no new server client kind: the default "web" kind carries client_version /
 // os_version, so we surface the desktop identity in client_version="Raft Desktop <ver>".
-// Returns null off the desktop shell (Web/PWA send no metadata — unchanged). Exported
-// for tests.
+// Returns null off the desktop shell (no desktop fields; the agent issue ticket
+// below still sends `locale`). Exported for tests.
 export async function desktopFeedbackMetadata(): Promise<Record<string, string> | null> {
   if (!isElectronDesktopShell()) return null;
   const raftDesktop = (window as {
@@ -37,18 +37,22 @@ export async function desktopFeedbackMetadata(): Promise<Record<string, string> 
 // already stored by the trace upload worker; the ticket carries only the
 // user's description plus `feedback_report_id`, which developer tooling uses to
 // find that bundle. Replies then arrive in the ordinary feedback inbox.
+// `locale` is the active Raft UI locale, sent as `metadata.locale` from every
+// client (Web/PWA and Desktop) so triage knows the reporter's language; the
+// message itself is never translated or altered.
 // Errors propagate as-is: the dialog treats any failure as "not filed" and
 // offers a retry with the same submission id.
 export async function createAgentIssueTicket(input: {
   message: string;
   feedbackReportId: string;
   submissionId: string;
+  locale: string;
 }): Promise<{ id: string }> {
   const form = new FormData();
   form.set("type", "problem");
   form.set("message", input.message);
   const desktopMetadata = await desktopFeedbackMetadata();
-  if (desktopMetadata) form.set("metadata", JSON.stringify(desktopMetadata));
+  form.set("metadata", JSON.stringify({ ...desktopMetadata, locale: input.locale }));
   form.set("submission_id", input.submissionId);
   form.set("may_contact", "false");
   form.set("feedback_report_id", input.feedbackReportId);

@@ -44,8 +44,8 @@ test("theme sweep keeps account, notification and billing actions semantic", () 
   assert.doesNotMatch(settings, /inline-flex shrink-0 border-2 border-line-strong bg-fill-muted/);
   assert.match(settings, /variant="outline"[\s\S]*settings\.notifications\.enabling/);
   assert.match(settings, /variant="outline"[\s\S]*billing\.seeAllFeaturesAndComparePlans/);
-  assert.match(settings, /h-full bg-primary-400/);
-  assert.match(settings, /h-full bg-accent-400/);
+  assert.match(settings, /h-full bg-primary-strong/);
+  assert.match(settings, /h-full bg-accent-strong/);
 });
 
 test("theme sweep keeps mobile links, billing summary, and search entity badges on RUI recipes", () => {
@@ -56,7 +56,7 @@ test("theme sweep keeps mobile links, billing summary, and search entity badges 
   assert.match(settings, /render=\{\([\s\S]*mobileDownloadUrl\("ios"\)[\s\S]*data-testid="mobile-download-ios"/);
   assert.match(settings, /<Card[\s\S]*variant="option"[\s\S]*data-testid="billing-summary-card"/);
   assert.doesNotMatch(settings, /data-testid="mobile-download-(?:android|ios)"[\s\S]*btn-brutal-sm/);
-  assert.match(search, /ARCHIVED_CHANNEL_BADGE_CLASS/);
+  assert.doesNotMatch(search, /ARCHIVED_CHANNEL_BADGE_CLASS/);
   assert.doesNotMatch(search, /variant="muted" appearance="outline"/);
 });
 

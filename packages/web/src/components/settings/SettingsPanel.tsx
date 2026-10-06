@@ -259,6 +259,7 @@ import ProviderConnectionsSettings from "./ProviderConnectionsSettings";
 import {
   AppNotificationRequestSummary,
   DeveloperAppNotifications,
+  DeveloperAppPermissions,
   InstalledAppNotifications,
 } from "./AppNotificationsControls";
 import type {
@@ -1480,7 +1481,7 @@ function DesktopNativeNotificationsCard() {
               {formatMessage({ id: "settings.notifications.desktop.description" })}
             </div>
           </div>
-          <span className="inline-flex shrink-0 border border-line-strong bg-primary px-2 py-1 text-[10px] font-bold uppercase text-primary-950 theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-soft-signal theme-brutal:text-black">
+          <span className="inline-flex shrink-0 border border-line-strong bg-primary-soft px-2 py-1 text-[10px] font-bold uppercase text-primary-strong theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-soft-signal theme-brutal:text-black">
             {formatMessage({ id: available ? "settings.notifications.desktop.statusSystemManaged" : "settings.notifications.desktop.statusUnavailable" })}
           </span>
         </div>
@@ -4384,7 +4385,7 @@ export function PlanSection() {
                     },
                   )}>
                   <ProgressIndicator
-                    className="rounded-none h-full bg-primary-400 theme-brutal:bg-soft-signal"
+                    className="rounded-none h-full bg-primary-strong theme-brutal:bg-soft-signal"
                     style={{ width: `${humanSeatUsagePercent}%` }}
                     data-slot="progress-indicator"
                   />
@@ -4400,7 +4401,7 @@ export function PlanSection() {
                     },
                   )}>
                   <ProgressIndicator
-                    className="rounded-none h-full bg-accent-400 theme-brutal:bg-brutal-pink"
+                    className="rounded-none h-full bg-accent-strong theme-brutal:bg-brutal-pink"
                     style={{ width: `${agentSeatUsagePercent}%` }}
                     data-slot="progress-indicator"
                   />
@@ -4998,7 +4999,7 @@ export type ConnectedAppStatus = "private" | "publish_requested" | "in_review" |
 type ConnectedAppsViewMode = "grid" | "list";
 
 const CONNECTED_APPS_VIEW_MODE_STORAGE_KEY = "raft:connected-apps:view-mode";
-const CONNECTED_APP_EDITOR_SECTION_IDS = ["profile", "login", "notifications", "distribution", "danger"] as const;
+const CONNECTED_APP_EDITOR_SECTION_IDS = ["profile", "login", "permissions", "notifications", "distribution", "danger"] as const;
 type ConnectedAppEditorSectionId = typeof CONNECTED_APP_EDITOR_SECTION_IDS[number];
 
 function canEditSourceOwnedConnectedApp(status: ConnectedAppStatus) {
@@ -5108,7 +5109,7 @@ function AppNotificationsLabel() {
   const { formatMessage } = useIntl();
   return (
     <span className="inline-flex min-w-0 flex-wrap items-center gap-1.5">
-      <span>{formatMessage({ id: "settings.connectedApps.section.appNotifications" })}</span>
+      <span>{formatMessage({ id: "settings.connectedApps.section.webhook" })}</span>
       <Badge.Experimental />
     </span>
   );
@@ -5116,7 +5117,7 @@ function AppNotificationsLabel() {
 
 function AppNotificationsEditorRailLabel() {
   const { formatMessage } = useIntl();
-  return <span>{formatMessage({ id: "settings.connectedApps.section.appNotifications" })}</span>;
+  return <span>{formatMessage({ id: "settings.connectedApps.section.webhook" })}</span>;
 }
 
 function ConnectedAppEditorSection({
@@ -5506,15 +5507,12 @@ export function DeclaredScopesPicker({
 
   return (
     <div className="border border-line-muted bg-layer-panel theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white p-3 shadow-raft-sm theme-brutal:shadow-brutal-sm" data-testid="connected-app-declared-scopes">
-      <SectionEyebrow as="div">{formatMessage({ id: "settings.connectedApps.declaredScopesTitle" })}</SectionEyebrow>
-      <div className="mt-1 text-xs leading-relaxed text-foreground-muted theme-brutal:text-black/60">
-        {formatMessage({ id: "settings.connectedApps.declaredScopesDescription" })}
-      </div>
+      {value.includes("agent:read") ? <p className="mt-2 text-xs text-foreground-muted" data-testid="legacy-agent-login-scope">{formatMessage({ id: "settings.connectedApps.appPermissions.legacyLoginScope" })}</p> : null}
       <div className="mt-3 space-y-2">
-        <details className="border border-line-muted theme-brutal:border-2 theme-brutal:border-black/15 bg-layer-canvas-muted theme-brutal:bg-brutal-cream p-2">
-          <summary className="text-xs font-black text-foreground-strong theme-brutal:text-black">
+        <div className="border border-line-muted theme-brutal:border-2 theme-brutal:border-black/15 bg-layer-canvas-muted theme-brutal:bg-brutal-cream p-2">
+          <div className="text-xs font-black text-foreground-strong theme-brutal:text-black">
             {formatMessage({ id: "settings.connectedApps.identitySection" })}
-          </summary>
+          </div>
           <div className="mt-2 flex flex-wrap gap-1.5">
             {IDENTITY_OAUTH_SCOPES.map((scope) => {
               const detail = OAUTH_SCOPE_PRESENTATION[scope];
@@ -5542,19 +5540,12 @@ export function DeclaredScopesPicker({
               );
             })}
           </div>
-        </details>
-        <section className="border border-line-muted bg-layer-canvas-muted p-2 theme-brutal:border-2 theme-brutal:border-black/15 theme-brutal:bg-brutal-cream" data-testid="agent-directory-permission">
-          <label className="flex items-center gap-2 text-xs font-black text-foreground-strong">
-            <Checkbox size="sm" checked={selected.has("agent:read")} onCheckedChange={(checked) => updateScope("agent:read", checked)} />
-            <span>{formatMessage({ id: "oauth.scopeGroup.agentDirectory" })}</span>
-          </label>
-          <p className="mt-2 text-xs leading-relaxed text-foreground-muted">{formatMessage({ id: "oauth.scope.agentRead.copy" })}</p>
-          <p className="mt-1 text-xs leading-relaxed text-foreground-muted">{formatMessage({ id: "settings.connectedApps.agentDirectoryIndependent" })}</p>
-        </section>
-        <details open className="border border-line-muted theme-brutal:border-2 theme-brutal:border-black/15 bg-layer-canvas-muted theme-brutal:bg-brutal-cream p-2">
-          <summary className="text-xs font-black text-foreground-strong theme-brutal:text-black">
+        </div>
+
+        <div className="border border-line-muted theme-brutal:border-2 theme-brutal:border-black/15 bg-layer-canvas-muted theme-brutal:bg-brutal-cream p-2">
+          <div className="text-xs font-black text-foreground-strong theme-brutal:text-black">
             {formatMessage({ id: "settings.connectedApps.agentMessagingSection" })}
-          </summary>
+          </div>
           <div className="mt-2 flex flex-wrap gap-2">
             {AGENT_INBOUND_OAUTH_SCOPES.map((scope) => {
               const detail = OAUTH_SCOPE_PRESENTATION[scope];
@@ -5577,7 +5568,7 @@ export function DeclaredScopesPicker({
               {formatMessage({ id: "settings.connectedApps.scopeRequiresResourceDetail" })}
             </div>
           )}
-        </details>
+        </div>
       </div>
     </div>
   );
@@ -6249,7 +6240,8 @@ export function IntegrationsSection() {
     ? (editingClient
       ? "settings.connectedApps.editor.status.oauthReady"
       : "settings.connectedApps.editor.status.readyToSave")
-    : "settings.connectedApps.editor.status.callbackMissing" });
+    : "settings.connectedApps.editor.status.loginOptional" });
+  const appPermissionsStatus = formatMessage({ id: "settings.connectedApps.appPermissions.selectionCount" }, { count: appNotificationSelection.groups.length });
   const notificationsStatus = appNotificationLoading
     ? formatMessage({ id: "common.loadingLabel" })
     : formatMessage({ id: !editingClient
@@ -6268,6 +6260,7 @@ export function IntegrationsSection() {
   }> = [
     { id: "profile", label: formatMessage({ id: "settings.connectedApps.section.profile" }), status: profileStatus, icon: <User size={14} /> },
     { id: "login", label: formatMessage({ id: "settings.connectedApps.section.loginWithRaft" }), status: loginStatus, icon: <Shield size={14} /> },
+    { id: "permissions", label: formatMessage({ id: "settings.connectedApps.section.appPermissions" }), status: appPermissionsStatus, icon: <Shield size={14} /> },
     { id: "notifications", label: <AppNotificationsEditorRailLabel />, status: notificationsStatus, icon: <Bell size={14} /> },
     { id: "distribution", label: formatMessage({ id: "settings.connectedApps.section.distribution" }), status: distributionStatus, icon: <Link2 size={14} /> },
     { id: "danger", label: formatMessage({ id: "settings.connectedApps.section.dangerZone" }), status: formatMessage({ id: editingClient ? "settings.connectedApps.editor.dangerStatusRestricted" : "settings.connectedApps.editor.dangerStatusAvailableAfterSave" }), icon: <AlertTriangle size={14} /> },
@@ -6423,7 +6416,7 @@ export function IntegrationsSection() {
                   {app.installed ? (
                     <Badge variant="success" uppercase>{formatMessage({ id: "settings.connectedApps.installed" })}</Badge>
                   ) : canManage ? (
-                    <span className="rounded-sm bg-accent-400 px-2.5 py-1 text-xs text-accent-950 theme-brutal:rounded-none btn-brutal-sm theme-brutal:bg-brutal-pink theme-brutal:text-black">{formatMessage({ id: "settings.connectedApps.install" })}</span>
+                    <span className="rounded-sm bg-accent-soft px-2.5 py-1 text-xs text-accent-strong theme-brutal:rounded-none btn-brutal-sm theme-brutal:bg-brutal-pink theme-brutal:text-black">{formatMessage({ id: "settings.connectedApps.install" })}</span>
                   ) : (
                     <Badge appearance="outline" uppercase>{formatMessage({ id: "settings.connectedApps.available" })}</Badge>
                   )}
@@ -6695,7 +6688,7 @@ export function IntegrationsSection() {
                 scopes={selectedListing.allowedScopes}
               />
             </ConnectedAppDetailSection>
-            <ConnectedAppDetailSection title={formatMessage({ id: "settings.connectedApps.section.appNotifications" })} tone="cream">
+            <ConnectedAppDetailSection title={formatMessage({ id: "settings.connectedApps.section.appPermissions" })} tone="cream">
               <AppNotificationRequestSummary
                 groups={selectedListing.appNotificationGroups}
                 events={selectedListing.appNotificationEvents}
@@ -6945,6 +6938,16 @@ export function IntegrationsSection() {
                 className="resize-none"
               />
             </FormField>
+            <FormField label={formatMessage({ id: "settings.connectedApps.clientIdLabel" })} labelStyle="plain" size="compact" hint={formatMessage({ id: "settings.connectedApps.clientIdHint" })} optional>
+              <Input
+                type="text"
+                value={clientId}
+                onChange={(event) => setClientId(event.target.value)}
+                className="w-full font-mono text-sm disabled:bg-fill-muted disabled:text-foreground-muted theme-brutal:disabled:bg-black/5 theme-brutal:disabled:text-black/45"
+                placeholder={formatMessage({ id: "settings.connectedApps.clientIdPlaceholder" })}
+                disabled={!!editingClient}
+              />
+            </FormField>
             <FormField label={formatMessage({ id: "settings.connectedApps.whenToUseLabel" })} labelStyle="plain" size="compact" hint={formatMessage({ id: "settings.connectedApps.whenToUseHint" })} optional>
               <Input
                 type="text"
@@ -6962,16 +6965,6 @@ export function IntegrationsSection() {
               description={formatMessage({ id: "settings.connectedApps.editor.loginDescription" })}
               status={loginStatus}
             >
-            <FormField label={formatMessage({ id: "settings.connectedApps.clientIdLabel" })} labelStyle="plain" size="compact" hint={formatMessage({ id: "settings.connectedApps.clientIdHint" })} optional>
-              <Input
-                type="text"
-                value={clientId}
-                onChange={(event) => setClientId(event.target.value)}
-                className="w-full font-mono text-sm disabled:bg-fill-muted disabled:text-foreground-muted theme-brutal:disabled:bg-black/5 theme-brutal:disabled:text-black/45"
-                placeholder={formatMessage({ id: "settings.connectedApps.clientIdPlaceholder" })}
-                disabled={!!editingClient}
-              />
-            </FormField>
             <FormField label={formatMessage({ id: "settings.connectedApps.returnUrlLabel" })} labelStyle="plain" size="compact">
               <Input
                 type="url"
@@ -6991,6 +6984,14 @@ export function IntegrationsSection() {
               />
             </FormField>
             <DeclaredScopesPicker value={clientAllowedScopes} onChange={setClientAllowedScopes} />
+            </ConnectedAppEditorSection>
+            <ConnectedAppEditorSection
+              sectionId="permissions"
+              title={formatMessage({ id: "settings.connectedApps.section.appPermissions" })}
+              description={formatMessage({ id: "settings.connectedApps.appPermissions.description" })}
+              status={appPermissionsStatus}
+            >
+              <DeveloperAppPermissions clientId={editingClient?.id ?? null} value={appNotificationSelection} onChange={setAppNotificationSelection} state={appNotificationState} loading={appNotificationLoading} />
             </ConnectedAppEditorSection>
             <ConnectedAppEditorSection
               sectionId="notifications"

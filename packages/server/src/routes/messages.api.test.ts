@@ -19,13 +19,14 @@ import { agentActivityEvents, attachmentObjectCharges, attachmentObjects, attach
 import { assignMachine, createAgent } from "../services/agentService";
 import { mintAgentCredential } from "../services/agentCredentialService";
 import { AgentOrchestrator } from "../services/agentOrchestrator";
-import { addAgent, addHuman, archiveChannel, createChannel, findOrCreateDM, findOrCreateUserDM, getActiveJointThreadProjectionsByCanonicalThread, getOrCreateThread, getOrCreateThreadForChannel, removeHuman } from "../services/channelService";
+import { addAgent, addHuman, archiveChannel, createChannel, findOrCreateDM, findOrCreateUserDM, getActiveJointThreadProjectionsByCanonicalThread, getActiveJointThreadProjectionsByCanonicalThreadsForServer, getOrCreateThread, getOrCreateThreadForChannel, removeHuman } from "../services/channelService";
 import { registerMachine } from "../services/machineService";
 import {
   __resetMessageServiceDepsForTests,
   __setMessageServiceDepsForTests,
   createMessage,
   listMessages,
+  projectJointMessagesToLocalChannel,
 } from "../services/messageService";
 import {
   __resetOrdinaryMessageOutboundAuthorizationResolverForTests,
@@ -2151,6 +2152,68 @@ test("joint channel thread permalink preview resolves replies through the caller
     ),
     "joint participant should resolve a focused reply when the client scopes context to the local thread projection",
   );
+});
+
+test("joint thread projection for a message page is one batched lookup scoped to the local server", async ({ app: _app }) => {
+  const db = getDb();
+  const hostOwner = await seedUser("joint-thread-batch-host@slock.test", "joint-thread-batch-host");
+  const guestOwner = await seedUser("joint-thread-batch-guest@slock.test", "joint-thread-batch-guest");
+  const hostServer = await createServer("Joint Thread Batch Host", "joint-thread-batch-host", hostOwner.id);
+  const guestServer = await createServer("Joint Thread Batch Guest", "joint-thread-batch-guest", guestOwner.id);
+  await db.insert(serverMembers).values([
+    { serverId: hostServer.id, userId: hostOwner.id, role: "owner" },
+    { serverId: guestServer.id, userId: guestOwner.id, role: "owner" },
+  ]).onConflictDoNothing();
+
+  const hostProjection = await createChannel(hostServer.id, "joint-thread-batch-room", undefined, "joint");
+  const guestProjection = await createChannel(guestServer.id, "joint-thread-batch-room", undefined, "joint");
+  await addHuman(hostProjection.id, hostOwner.id);
+  await addHuman(guestProjection.id, guestOwner.id);
+  const [joint] = await db.insert(jointChannels).values({
+    canonicalChannelId: hostProjection.id,
+    createdByServerId: hostServer.id,
+    createdByUserId: hostOwner.id,
+  }).returning();
+  await db.insert(jointChannelServers).values([
+    { jointChannelId: joint.id, serverId: hostServer.id, localChannelId: hostProjection.id, role: "host", joinedByUserId: hostOwner.id },
+    { jointChannelId: joint.id, serverId: guestServer.id, localChannelId: guestProjection.id, role: "participant", joinedByUserId: guestOwner.id },
+  ]);
+
+  const canonicalIds: string[] = [];
+  for (const content of ["batch parent a", "batch parent b"]) {
+    const parent = await createMessage(hostProjection.id, "user", hostOwner.id, content);
+    const thread = await getOrCreateThreadForChannel(hostProjection.id, parent.id, hostOwner.id, "user");
+    canonicalIds.push(thread.canonicalThreadChannelId);
+  }
+
+  // Reference: the per-thread lookup the page used to run once per thread id.
+  const expectedLocal = async (canonicalId: string, serverId: string) =>
+    (await getActiveJointThreadProjectionsByCanonicalThread(canonicalId))
+      .find((projection) => projection.localServerId === serverId)?.localThreadChannelId;
+
+  const guestRows = await getActiveJointThreadProjectionsByCanonicalThreadsForServer(canonicalIds, guestServer.id);
+  assert.deepEqual([...new Set(guestRows.map((row) => row.localServerId))], [guestServer.id]);
+  assert.deepEqual(new Set(guestRows.map((row) => row.canonicalThreadChannelId)), new Set(canonicalIds));
+  assert.deepEqual(await getActiveJointThreadProjectionsByCanonicalThreadsForServer([], guestServer.id), []);
+
+  const unrelatedThreadId = "00000000-0000-4000-8000-000000000001";
+  const page = [
+    { id: "m1", channelId: hostProjection.id, threadId: canonicalIds[0] },
+    { id: "m2", channelId: hostProjection.id, threadId: canonicalIds[1] },
+    { id: "m3", channelId: hostProjection.id, threadId: unrelatedThreadId },
+    { id: "m4", channelId: hostProjection.id, threadId: null },
+  ];
+  for (const [serverId, localChannelId] of [[guestServer.id, guestProjection.id], [hostServer.id, hostProjection.id]] as const) {
+    const projected = await projectJointMessagesToLocalChannel(page, localChannelId, serverId);
+    assert.deepEqual(projected.map((message) => message.channelId), page.map(() => localChannelId));
+    assert.equal(projected[0]!.threadId, await expectedLocal(canonicalIds[0]!, serverId));
+    assert.equal(projected[1]!.threadId, await expectedLocal(canonicalIds[1]!, serverId));
+    assert.equal(projected[2]!.threadId, unrelatedThreadId, "threads without a projection keep their id");
+    assert.equal(projected[3]!.threadId, null);
+  }
+  const guestPage = await projectJointMessagesToLocalChannel(page, guestProjection.id, guestServer.id);
+  assert.ok(guestPage[0]!.threadId, "guest page has a local thread id");
+  assert.notEqual(guestPage[0]!.threadId, canonicalIds[0], "guest page must see its own local thread, not the canonical one");
 });
 
 test("message reactions add idempotently, enrich messages, and remove cleanly", async ({ app }) => {

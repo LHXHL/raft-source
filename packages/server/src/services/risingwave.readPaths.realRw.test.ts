@@ -135,7 +135,7 @@ test.skipIf(!configured)("Activity readers: items, mentions, scoped channel, uni
   assert.equal(totals.get(f.senderServer.id)?.totalUnreadCount ?? 0, 0);
 });
 
-test.skipIf(!configured)("active followed threads are served by rw_followed_threads_v4 and equal the legacy path", async () => {
+test.skipIf(!configured)("active followed threads are served by rw_followed_threads_v5 and equal the legacy path", async () => {
   const traced: Array<{ name: string; attrs: Record<string, unknown> | undefined }> = [];
   const traceQuery: DbQueryTracer = async (name, work, onComplete) => {
     const result = await work();
@@ -161,7 +161,7 @@ test.skipIf(!configured)("active followed threads are served by rw_followed_thre
   assert.deepEqual(byId(threads), byId(legacy));
 });
 
-test.skipIf(!configured)("rw_followed_threads_v4 carries the parent's task (rw_tasks) and long-content previews", async () => {
+test.skipIf(!configured)("rw_followed_threads_v5 carries the parent's task (rw_tasks) and long-content previews", async () => {
   const db = getDb();
   const [parentChannel] = await db.insert(channels).values({
     serverId: f.receiverServer.id, name: `rwreal-v4-task-${f.tag}`, type: "channel",
@@ -195,7 +195,7 @@ test.skipIf(!configured)("rw_followed_threads_v4 carries the parent's task (rw_t
   do {
     const read = await queryRisingWave<{ n: string }>(
       pool,
-      `SELECT count(*) AS n FROM rw_followed_threads_v4
+      `SELECT count(*) AS n FROM rw_followed_threads_v5
         WHERE server_id = $1 AND user_id = $2 AND thread_channel_id = $3 AND task_id = $4 AND reply_count = 1`,
       [f.receiverServer.id, f.receiver.id, thread.id, task.id],
     );
@@ -203,7 +203,7 @@ test.skipIf(!configured)("rw_followed_threads_v4 carries the parent's task (rw_t
     if (propagated) break;
     await new Promise((resolve) => setTimeout(resolve, 500));
   } while (Date.now() < deadline);
-  assert.ok(propagated, "the thread, its reply and its task reached rw_followed_threads_v4");
+  assert.ok(propagated, "the thread, its reply and its task reached rw_followed_threads_v5");
 
   const rw = await getFollowedThreads(f.receiverServer.id, f.receiver.id);
   const legacy = await getFollowedThreads(f.receiverServer.id, f.receiver.id, undefined, { forceLegacyPath: true });
@@ -215,7 +215,7 @@ test.skipIf(!configured)("rw_followed_threads_v4 carries the parent's task (rw_t
   assert.equal(rwRow.parentMessagePreview, `${longParent.slice(0, 100)}…`);
 }, 180_000);
 
-test.skipIf(!configured)("followed-thread stats are served by rw_followed_threads_v4 (legacy path)", async () => {
+test.skipIf(!configured)("followed-thread stats are served by rw_followed_threads_v5 (legacy path)", async () => {
   const traced: Array<{ name: string; attrs: Record<string, unknown> | undefined }> = [];
   const traceQuery: DbQueryTracer = async (name, work, onComplete) => {
     const result = await work();
@@ -230,7 +230,7 @@ test.skipIf(!configured)("followed-thread stats are served by rw_followed_thread
   assert.equal(stats?.attrs?.backend, "risingwave", `stats read did not come from RisingWave: ${JSON.stringify(stats?.attrs)}`);
 });
 
-test.skipIf(!configured)("unfollowed and done threads list without error, with stats from rw_followed_threads_v4", async () => {
+test.skipIf(!configured)("unfollowed and done threads list without error, with stats from rw_followed_threads_v5", async () => {
   const db = getDb();
   // A channel of its own (no agent member): parents posted in the shared
   // fixture's general would change the agent inbox counts asserted below.
@@ -286,7 +286,7 @@ test.skipIf(!configured)("unfollowed and done threads list without error, with s
   assert.deepEqual(replyCounts, { unfollowed: 1, done: 1 }, "RW serves stats for done and unfollowed follows");
 }, 180_000);
 
-test.skipIf(!configured)("rw_followed_threads_v4 counts unread with the chain rule: self-caused system and noise subtypes excluded, a peer's message counted", async () => {
+test.skipIf(!configured)("rw_followed_threads_v5 counts unread with the chain rule: self-caused system and noise subtypes excluded, a peer's message counted", async () => {
   const db = getDb();
   // A channel of its own (no agent member), so the agent inbox counts below hold.
   const [parentChannel] = await db.insert(channels).values({

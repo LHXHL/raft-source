@@ -18,7 +18,7 @@ import { useServerStore } from "../../store/serverStore";
 import { useAgentStore } from "../../store/agentStore";
 import type { Agent } from "../../store/agentStore";
 import { useMachineStore } from "../../store/machineStore";
-import { buildFeedbackExportBundle } from "../../utils/feedbackExportBundle";
+import { buildFeedbackExportBundle, snapshotAgentMachine } from "../../utils/feedbackExportBundle";
 import type { FeedbackExportBundleV2 } from "../../utils/feedbackExportBundle";
 import { detectBrowserTimezone } from "../../utils/timeFormatting";
 import { WEB_APP_VERSION } from "../../utils/webAppVersion";
@@ -165,7 +165,7 @@ export default function ReportIssueDialog({
   onClose,
   feedbackExportUrl = FEEDBACK_EXPORT_URL,
 }: ReportIssueDialogProps) {
-  const { formatMessage } = useIntl();
+  const { formatMessage, locale } = useIntl();
   const navigate = useNavigate();
   const user = useAuthStore((s) => s.user);
   const server = useServerStore((s) => s.current);
@@ -236,9 +236,10 @@ export default function ReportIssueDialog({
         const activityLog = includeActivityLog ? getActivityLog(agent.id) : null;
         const trajectoryLog = includeTrajectoryLog ? getTrajectoryLog(agent.id) : null;
 
+        const { daemonVersion, ...machineSnapshot } = snapshotAgentMachine(machine);
         bundle = buildFeedbackExportBundle({
           appVersion: FEEDBACK_APP_VERSION,
-          daemonVersion: machine?.daemonVersion ?? null,
+          daemonVersion,
           reporter: {
             id: user?.id ?? null,
             email: user?.email ?? null,
@@ -260,8 +261,7 @@ export default function ReportIssueDialog({
             model: agent.model,
             reasoningEffort: agent.reasoningEffort,
             machineId: agent.machineId,
-            machineName: machine?.name ?? null,
-            machineStatus: machine?.status ?? null,
+            ...machineSnapshot,
           },
           recentMessages,
           ephemeralActivityBuffer: activityLog,
@@ -424,6 +424,8 @@ export default function ReportIssueDialog({
         message: [agentTitle, description.trim()].filter(Boolean).join("\n\n"),
         feedbackReportId: report.id,
         submissionId: crypto.randomUUID(),
+        // The same react-intl locale that formatted agentTitle above.
+        locale,
       };
       const ticketId = await fileTicket(ticketRequest);
 

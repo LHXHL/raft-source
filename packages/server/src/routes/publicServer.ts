@@ -1,4 +1,5 @@
 import { Router, type Router as ExpressRouter } from "express";
+import { kickAppNotificationDelivery } from "../services/appNotificationDeliveryService";
 import { and, desc, eq, isNull, lt, sql } from "drizzle-orm";
 import type { Server as SocketServer } from "socket.io";
 import { getDb } from "../db/index";
@@ -370,6 +371,8 @@ publicServerRouter.post("/servers/:slug/join-as-guest", requireAuth, requireVeri
       return;
     }
     if (result.joined) {
+      // Committed: deliver the server.member_added App Notification now.
+      kickAppNotificationDelivery();
       const io = req.app.get("io") as SocketServer | undefined;
       const agentOrchestrator = req.app.get("agentOrchestrator") as AgentOrchestrator | undefined;
       if (io) {

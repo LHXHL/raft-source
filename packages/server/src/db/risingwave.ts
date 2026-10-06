@@ -101,6 +101,32 @@ export class RisingWaveNotConfiguredError extends Error {
   }
 }
 
+/**
+ * Every RisingWave pool connection stayed busy past the acquire timeout
+ * (RISINGWAVE_CONNECTION_TIMEOUT_MS): RisingWave is slow, not down, and the
+ * request can be retried. Routes answer it with 503 + Retry-After instead of
+ * 500 (respondToRisingWaveOverload). The message keeps pg-pool's wording so
+ * trace classification still reads it as rw_acquire_timeout.
+ */
+export class RisingWaveOverloadedError extends Error {
+  constructor(cause: unknown) {
+    super(`RisingWave pool saturated: ${cause instanceof Error ? cause.message : String(cause)}`, { cause });
+    this.name = "RisingWaveOverloadedError";
+  }
+}
+
+/** pg-pool's "no client within connectionTimeoutMillis" error. */
+export function isPoolAcquireTimeoutError(error: unknown): boolean {
+  return error instanceof Error && /timeout exceeded when trying to connect/i.test(error.message);
+}
+
+/** Rethrow a RisingWave pool acquire timeout as RisingWaveOverloadedError. */
+export function asRisingWaveOverload(error: unknown): unknown {
+  return isPoolAcquireTimeoutError(error) && !(error instanceof RisingWaveOverloadedError)
+    ? new RisingWaveOverloadedError(error)
+    : error;
+}
+
 export function getRisingWaveConnectionTimeoutMillis(env: NodeJS.ProcessEnv = process.env): number {
   const raw = env.RISINGWAVE_CONNECTION_TIMEOUT_MS?.trim();
   if (!raw) return DEFAULT_RISINGWAVE_CONNECTION_TIMEOUT_MS;
@@ -123,7 +149,12 @@ export async function queryRisingWave<T extends pg.QueryResultRow = any>(
   // can surface any such call site at any depth.
   recordExternalSinkInsideTransaction("risingwave");
   const acquireStartedAt = performance.now();
-  const client = await pool.connect();
+  let client: pg.PoolClient;
+  try {
+    client = await pool.connect();
+  } catch (error) {
+    throw asRisingWaveOverload(error);
+  }
   const acquireWaitMs = performance.now() - acquireStartedAt;
   const poolState = getRisingWavePoolState(pool);
   try {

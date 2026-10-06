@@ -78,6 +78,7 @@ import type { RuntimeLaunchVersionPolicy } from "./drivers/types";
 import { RuntimeVersionTooOldError } from "./runtimeLaunchVersion";
 import { traceRows } from "./testing/traceRows";
 import { makeDeterministicTracer } from "./testing/deterministicTracer";
+import { releaseAgentManagerForTests } from "./testing/agentManagerTeardown";
 
 class FakeChildProcess extends EventEmitter {
   stdout = new EventEmitter();
@@ -260,23 +261,7 @@ async function withManager(
   try {
     await fn({ driver, manager, sent, dataDir });
   } finally {
-    setSessionReadyDeliveryRetrySchedulerFactoryForTesting(null);
-    if ((manager as any).agentStartPumpTimer) clearTimeout((manager as any).agentStartPumpTimer);
-    for (const ap of (manager as any).agents?.values?.() ?? []) {
-      ap.notifications.clearTimer();
-      if (ap.pendingTrajectory?.timer) clearTimeout(ap.pendingTrajectory.timer);
-      if (ap.activityHeartbeat?.kind === "active") clearInterval(ap.activityHeartbeat.timer);
-      if (ap.startup?.kind === "waiting" && ap.startup.timer) clearTimeout(ap.startup.timer);
-      if (ap.exit?.kind === "live" && ap.exit.stalledRecoverySigtermTimer) clearTimeout(ap.exit.stalledRecoverySigtermTimer);
-      if (ap.compaction?.kind === "active" && ap.compaction.watchdog) clearTimeout(ap.compaction.watchdog);
-      if (ap.runtimeErrorDeliveryBackoff?.kind === "backing_off" && ap.runtimeErrorDeliveryBackoff.timer) {
-        clearTimeout(ap.runtimeErrorDeliveryBackoff.timer);
-      }
-      if (ap.sessionReadyDeliveryRetry?.kind === "scheduled") {
-        ap.sessionReadyDeliveryRetry.scheduler.clearTimer();
-      }
-    }
-    (manager as any).agents?.clear?.();
+    await releaseAgentManagerForTests(manager);
     await rm(dataDir, { recursive: true, force: true });
   }
 }

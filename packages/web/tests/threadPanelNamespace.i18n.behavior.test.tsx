@@ -2,10 +2,11 @@ import assert from "node:assert/strict";
 import "./helpers/domSetup";
 import { act } from "react";
 import { cleanup, fireEvent, render as rtlRender, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { BrowserRouter, MemoryRouter } from "react-router-dom";
 import { TestIntlProvider } from "./helpers/intl";
 import api from "../src/api/client";
 import ThreadPanel from "../src/components/message/ThreadPanel";
+import { isCurrentRightPanelSearchSnapshot } from "../src/components/layout/rightPanelUrlSync";
 import { useAuthStore } from "../src/store/authStore";
 import type { User } from "../src/store/authStore";
 import { useChannelStore } from "../src/store/channelStore";
@@ -30,6 +31,7 @@ window.matchMedia = window.matchMedia ?? (() => ({
   addListener: () => {}, removeListener: () => {},
   addEventListener: () => {}, removeEventListener: () => {}, dispatchEvent: () => false,
 }));
+const defaultMatchMedia = window.matchMedia;
 globalThis.IntersectionObserver = globalThis.IntersectionObserver ?? class {
   observe() {} unobserve() {} disconnect() {} takeRecords() { return []; }
 } as typeof IntersectionObserver;
@@ -57,8 +59,22 @@ afterEach(() => {
   useMessageStore.setState(useMessageStore.getInitialState(), true);
   useThreadStore.setState(useThreadStore.getInitialState(), true);
   useTaskStore.setState(useTaskStore.getInitialState(), true);
+  window.matchMedia = defaultMatchMedia;
   window.history.pushState({}, "", "/");
 });
+
+function installMatchMedia(matches: boolean): void {
+  window.matchMedia = (() => ({
+    matches,
+    media: "(min-width: 1024px)",
+    onchange: null,
+    addListener: () => {},
+    removeListener: () => {},
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    dispatchEvent: () => false,
+  })) as typeof window.matchMedia;
+}
 
 function makeUser(overrides: Partial<User> = {}): User {
   return {
@@ -196,6 +212,52 @@ test("ThreadPanel keeps chrome above its mobile scrolling history", () => {
     "content layer remains inside the isolated panel",
   );
   assert.ok(container.contains(panel));
+});
+
+test("mounted desktop ThreadPanel View in channel pushes and closes before the route commits", async () => {
+  installMatchMedia(true);
+  seedThreadPanel(true);
+  window.history.pushState(
+    { idx: 4, key: "origin-thread" },
+    "",
+    "/s/tp-i18n/channel/parent-channel?thread=parent-channel%3Aparent-message",
+  );
+  const historyLengthBefore = window.history.length;
+
+  renderEn(
+    <BrowserRouter>
+      <ThreadPanel composerAutoFocus={false} />
+    </BrowserRouter>,
+  );
+
+  await act(async () => {
+    fireEvent.click(screen.getByTestId("thread-overflow-trigger"));
+    await Promise.resolve();
+  });
+  const viewInChannel = await screen.findByTestId("thread-overflow-view-in-channel");
+  await act(async () => {
+    fireEvent.click(viewInChannel);
+    await Promise.resolve();
+  });
+
+  assert.equal(window.location.pathname, "/s/tp-i18n/channel/parent-channel");
+  assert.equal(window.location.search, "?msg=parent-message");
+  assert.equal(
+    window.history.length,
+    historyLengthBefore + 1,
+    "desktop View in channel must PUSH so Back can return to the thread entry",
+  );
+  assert.equal(
+    useThreadStore.getState().openParentMessageId,
+    null,
+    "ThreadPanel's real click handler must close the thread synchronously",
+  );
+  assert.equal(
+    isCurrentRightPanelSearchSnapshot("?thread=parent-channel%3Aparent-message"),
+    false,
+    "the stale origin thread snapshot must not regain store ownership",
+  );
+  assert.equal(isCurrentRightPanelSearchSnapshot("?msg=parent-message"), true);
 });
 
 test("ThreadPanel reply rows use the current auth avatar when the member cache is stale", async () => {

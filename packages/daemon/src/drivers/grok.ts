@@ -24,11 +24,11 @@ import {
   type GrokJsonRpcMessage,
 } from "./grokEventNormalizer";
 import {
-  requiresWindowsShell,
   resolveCommandOnPath,
   withWindowsUserEnvironment,
   type ProbeDeps,
 } from "./probe";
+import { resolveWindowsDirectLaunch, type DirectLaunch } from "./windowsLaunch";
 import type {
   ParsedEvent,
   RuntimeBusyDeliveryReadiness,
@@ -44,11 +44,7 @@ const GROK_INTERJECT_METHOD = "_x.ai/interject" as const;
 const GROK_REQUEST_PERMISSION_METHOD = "session/request_permission" as const;
 const KNOWN_REASONING_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max", "ultra"]);
 
-interface GrokLaunch {
-  command: string;
-  args: string[];
-  shell: boolean;
-}
+type GrokLaunch = DirectLaunch;
 
 interface PendingPromptRequest {
   method: "turn/start";
@@ -140,15 +136,22 @@ function describeProbeFailure(error: unknown): string {
   return "probe failed";
 }
 
-function readGrokVersion(command: string, shell: boolean, deps: ProbeDeps): string | null {
+function grokDirectLaunch(command: string, args: string[], deps: ProbeDeps): GrokLaunch {
+  const platform = deps.platform ?? process.platform;
+  if (platform !== "win32") return { command, args, shell: false };
+  return resolveWindowsDirectLaunch("grok", command, args, deps);
+}
+
+function readGrokVersion(command: string, deps: ProbeDeps): string | null {
   const execFileSyncFn = deps.execFileSyncFn ?? execFileSync;
-  const env = withWindowsUserEnvironment(deps.env ?? process.env, deps);
   try {
-    const output = execFileSyncFn(command, ["--version"], {
+    const launch = grokDirectLaunch(command, ["--version"], deps);
+    const env = withWindowsUserEnvironment(launch.env ?? deps.env ?? process.env, deps);
+    const output = execFileSyncFn(launch.command, launch.args, {
       stdio: ["ignore", "pipe", "pipe"],
       env,
       timeout: 5000,
-      shell,
+      shell: false,
     });
     return (Buffer.isBuffer(output) ? output.toString("utf8") : String(output ?? "")).trim().split(/\r?\n/)[0] || null;
   } catch {
@@ -165,12 +168,7 @@ export function resolveGrokSpawn(args: string[], deps: ProbeDeps = {}): GrokLaun
   if (!command) {
     throw new RuntimeExecutableNotFoundError({ runtimeId: "grok", message: "Cannot resolve the Grok Build CLI on PATH. Install Grok Build and run `grok login` first." });
   }
-  const platform = deps.platform ?? process.platform;
-  return {
-    command,
-    args,
-    shell: requiresWindowsShell(command, platform),
-  };
+  return grokDirectLaunch(command, args, deps);
 }
 
 export function probeGrok(deps: ProbeDeps = {}): RuntimeProbeResult {
@@ -178,18 +176,20 @@ export function probeGrok(deps: ProbeDeps = {}): RuntimeProbeResult {
   if (!command) {
     return { available: false, diagnostic: "No Grok Build CLI was found on PATH." };
   }
-  const platform = deps.platform ?? process.platform;
-  const shell = requiresWindowsShell(command, platform);
   const execFileSyncFn = deps.execFileSyncFn ?? execFileSync;
-  const env = withWindowsUserEnvironment(deps.env ?? process.env, deps);
   try {
-    execFileSyncFn(command, [...GROK_AGENT_PROBE_ARGS], {
+    const launch = grokDirectLaunch(command, [...GROK_AGENT_PROBE_ARGS], deps);
+    const env = withWindowsUserEnvironment(launch.env ?? deps.env ?? process.env, deps);
+    execFileSyncFn(launch.command, launch.args, {
       stdio: ["ignore", "pipe", "pipe"],
       env,
       timeout: 5000,
-      shell,
+      shell: false,
     });
   } catch (error) {
+    if (error instanceof RuntimeExecutableNotFoundError) {
+      return { available: false, diagnostic: error.message };
+    }
     return {
       available: false,
       diagnostic: `Grok Build agent stdio probe failed: ${describeProbeFailure(error)}.`,
@@ -197,7 +197,7 @@ export function probeGrok(deps: ProbeDeps = {}): RuntimeProbeResult {
   }
   return {
     available: true,
-    version: readGrokVersion(command, shell, deps) ?? undefined,
+    version: readGrokVersion(command, deps) ?? undefined,
   };
 }
 
@@ -448,8 +448,8 @@ export class GrokDriver implements RuntimeDriver {
     const proc = spawn(launch.command, launch.args, {
       cwd: ctx.workingDirectory,
       stdio: ["pipe", "pipe", "pipe"],
-      env: spawnEnv,
-      shell: launch.shell,
+      env: launch.env ?? spawnEnv,
+      shell: false,
     });
     this.process = proc;
 
@@ -766,8 +766,8 @@ export async function detectGrokModelsFromAcp(
     const proc = spawn(launch.command, launch.args, {
       cwd: options.cwd ?? process.cwd(),
       stdio: ["pipe", "pipe", "ignore"],
-      env,
-      shell: launch.shell,
+      env: launch.env ?? env,
+      shell: false,
     });
     let settled = false;
     let buffer = "";

@@ -44,8 +44,7 @@ interface OpenCodeModelsCommandResult {
 
 type OpenCodeModelsCommand = (home: string) => OpenCodeModelsCommandResult;
 
-export interface OpenCodeModelsCommandDeps {
-  platform?: NodeJS.Platform;
+export interface OpenCodeModelsCommandDeps extends OpenCodeProbeDeps {
   spawnSyncFn?: typeof spawnSync;
 }
 
@@ -287,11 +286,20 @@ export function runOpenCodeModelsCommand(
 ): OpenCodeModelsCommandResult {
   const platform = deps.platform ?? process.platform;
   const spawnSyncFn = deps.spawnSyncFn ?? spawnSync;
-  const result = spawnSyncFn("opencode", ["models"], {
-    env: { ...process.env, HOME: home, FORCE_COLOR: "0", NO_COLOR: "1" },
+  const env = { ...process.env, HOME: home, FORCE_COLOR: "0", NO_COLOR: "1" };
+  let launch: { command: string; args: string[]; env?: NodeJS.ProcessEnv } = { command: "opencode", args: ["models"] };
+  if (platform === "win32") {
+    try {
+      launch = resolveOpenCodeSpawn(["models"], { ...deps, env });
+    } catch (error) {
+      return { status: null, stdout: "", error: error as Error };
+    }
+  }
+  const result = spawnSyncFn(launch.command, launch.args, {
+    env: launch.env ?? env,
     encoding: "utf8",
     timeout: 5000,
-    shell: platform === "win32",
+    shell: false,
   });
   return {
     status: result.status,

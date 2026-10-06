@@ -13,6 +13,8 @@ import { dirname, join } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
+import { computeOffset, replicaServerPort } from "./raftdev";
+
 const projectDir = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 const raftdev = join(projectDir, "raftdev");
 const raftdevScript = join(projectDir, "scripts", "dev", "raftdev.ts");
@@ -543,9 +545,87 @@ exit 1
     assert.match(child.stdout, /Environment 'status-external-redis':/);
     assert.match(
       child.stdout,
-      /Runtime\s+: running \(tmux session \+ required services ready; Redis external\)/,
+      /Runtime\s+: running \(tmux session \+ required services ready; application ports listening; Redis external\)/,
     );
     assert.doesNotMatch(child.stdout, /Recovery\s+:/);
+  });
+});
+
+// A surviving tmux shell/watch parent and healthy backing containers do not
+// imply that the API or web child still has a listening socket.
+for (const missing of ["server", "web", "server-2", "none"] as const) {
+  test(`status checks application listeners with surviving tmux: ${missing}`, () => {
+    withFakeBin((_root, bin) => {
+      const offset = computeOffset("liveness");
+      const e = { OFFSET: offset, SERVER_PORT: 13001 + offset, WEB_PORT: 15173 + offset };
+      const ports = { server: e.SERVER_PORT, web: e.WEB_PORT, "server-2": replicaServerPort(e.OFFSET, 2) };
+      writeExecutable(join(bin, "docker"), `#!/bin/sh
+[ "$1" = ps ] || exit 1
+printf '%s\\n' slock-dev-liveness-pg slock-dev-liveness-redis slock-dev-liveness-rustfs
+`);
+      writeExecutable(join(bin, "tmux"), `#!/bin/sh
+case "$1" in
+  list-sessions) printf 'slock-liveness\\n' ;;
+  list-windows) printf 'server\\nweb\\nserver-2\\n' ;;
+  *) exit 1 ;;
+esac
+`);
+      writeExecutable(join(bin, "lsof"), `#!/bin/sh
+${missing === "none" ? "" : `[ "$1" != "-iTCP:${ports[missing]}" ] || exit 1`}
+printf 'listener\\n'
+`);
+      const child = spawnSync(process.execPath,
+        ["--import", "@oxc-node/core/register", raftdevScript, "status"], {
+          cwd: projectDir, encoding: "utf8",
+          env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` },
+        });
+      assert.equal(child.status, 0, child.stderr);
+      if (missing === "none") {
+        assert.match(child.stdout, /Runtime\s+: running .*application ports listening/);
+        assert.doesNotMatch(child.stdout, /Recovery\s+:/);
+      } else {
+        assert.match(child.stdout, /Runtime\s+: partial\/orphan/);
+        assert.doesNotMatch(child.stdout, /Runtime\s+: running/);
+        assert.ok(child.stdout.includes(`${missing} :${ports[missing]} (no listener detected)`), child.stdout);
+        assert.match(child.stdout, /Recovery\s+: \.\/raftdev stop liveness/);
+      }
+    });
+  });
+}
+
+test("start with a stale tmux session reports no start and missing API without mutating it", () => {
+  withFakeBin((root, bin) => {
+    const offset = computeOffset("liveness");
+    const e = { SERVER_PORT: 13001 + offset, WEB_PORT: 15173 + offset };
+    const log = join(root, "mutations");
+    writeExecutable(join(bin, "docker"), `#!/bin/sh
+printf '%s\\n' "$*" >> '${log}'
+exit 1
+`);
+    writeExecutable(join(bin, "tmux"), `#!/bin/sh
+case "$1" in
+  has-session) exit 0 ;;
+  list-windows) printf 'server\\nweb\\n' ;;
+  *) printf '%s\\n' "$*" >> '${log}'; exit 1 ;;
+esac
+`);
+    writeExecutable(join(bin, "lsof"), `#!/bin/sh
+[ "$1" = "-iTCP:${e.WEB_PORT}" ] || exit 1
+printf 'web-listener\\n'
+`);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const child = spawnSync(process.execPath,
+        ["--import", "@oxc-node/core/register", raftdevScript, "start", "liveness"], {
+          cwd: projectDir, encoding: "utf8",
+          env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}`, SLOCKDEV_TUNNEL: "0" },
+        });
+      assert.equal(child.status, 1, child.stderr);
+      assert.match(child.stdout, /tmux session already exists; no processes were started/);
+      assert.doesNotMatch(child.stdout, /already running/);
+      assert.ok(child.stdout.includes(`server :${e.SERVER_PORT} (no listener detected)`), child.stdout);
+      assert.match(child.stdout, /Stop:.*raftdev stop liveness/);
+    }
+    assert.equal(existsSync(log), false, "status rejection must not stop/respawn or touch Docker");
   });
 });
 

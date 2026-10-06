@@ -4,6 +4,7 @@ import "./helpers/domSetup";
 import type { ReactNode } from "react";
 import { act, cleanup, fireEvent, render as rtlRender, screen, waitFor } from "@testing-library/react";
 import { TestIntlProvider } from "./helpers/intl";
+import { installForwardFoldMeasurementStub } from "./helpers/forwardFoldMeasurement";
 const render: typeof rtlRender = (ui, options) => rtlRender(ui, { wrapper: TestIntlProvider, ...options });
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { ToastProvider, toast } from "raft-ui";
@@ -27,6 +28,7 @@ import { useTaskStore } from "../src/store/taskStore";
 import { useThreadStore } from "../src/store/threadStore";
 
 const originalPost = api.post.bind(api);
+let restoreForwardFoldMeasurement: (() => void) | null = null;
 const originalGet = api.get.bind(api);
 const test = ((name: string, fn: Parameters<typeof nodeTest>[1]) =>
   nodeTest(name,  fn)) as typeof nodeTest;
@@ -419,6 +421,8 @@ afterEach(() => {
   api.get = originalGet as typeof api.get;
   api.post = originalPost as typeof api.post;
   window.matchMedia = defaultMatchMedia;
+  restoreForwardFoldMeasurement?.();
+  restoreForwardFoldMeasurement = null;
   HTMLElement.prototype.scrollIntoView = defaultScrollIntoView;
   if (defaultVisualViewport) {
     Object.defineProperty(window, "visualViewport", defaultVisualViewport);
@@ -703,6 +707,7 @@ test("forwarded public source label opens the first source position only on sent
 
 
 test("mobile View all uses a route-backed dedicated page and Back preserves other query state", async () => {
+  restoreForwardFoldMeasurement = installForwardFoldMeasurementStub();
   window.matchMedia = ((query: string) => ({
     matches: query === "(max-width: 767px)",
     media: query,
@@ -719,7 +724,9 @@ test("mobile View all uses a route-backed dedicated page and Back preserves othe
     sourceAuthorSnapshot: { type: "user", id: "user-2", name: "Babbage", uniqueName: "babbage" },
     sourceCreatedAt: "2026-06-30T00:00:00.000Z",
     sourceTargetSnapshot: { id: "source-channel", type: "channel", label: "#source", labelVisibility: "public" },
-    contentSnapshot: `mobile forwarded body ${index}`,
+    // Long enough to really overflow the eight-line fold; the stub below
+    // tells jsdom (which has no layout) the same.
+    contentSnapshot: `mobile forwarded body ${index}. ${"Forwarded context sentence. ".repeat(8)}`,
     provenanceState: "available" as const,
   }));
 

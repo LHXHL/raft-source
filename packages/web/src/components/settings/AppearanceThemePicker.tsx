@@ -161,7 +161,7 @@ export function AppearanceThemePicker({
                   {groupLabel}
                 </div>
                 {isEffective ? (
-                  <span className="rounded-full bg-primary/20 px-2 py-0.5 text-[10px] font-bold text-primary-950 dark:text-primary-100">
+                  <span className="rounded-full bg-primary-soft px-2 py-0.5 text-[10px] font-bold text-primary-strong">
                     {formatMessage({ id: "settings.appearance.currentTheme" })}
                   </span>
                 ) : null}
@@ -192,7 +192,9 @@ export function AppearanceThemePicker({
                         selected ? "border-line-strong shadow-raft-md" : "border-line-muted shadow-none"
                       }`
                     : `rounded-lg border-[0.5px] bg-layer-panel shadow-none ${
-                        selected ? "border-primary-400" : "border-line-muted"
+                        selected
+                          ? "border-accent-strong theme-brutal:border-soft-signal"
+                          : "border-line-muted"
                       }`;
                   return (
                     <div
@@ -208,7 +210,7 @@ export function AppearanceThemePicker({
                       />
                       <div
                         data-theme={option.family}
-                        className={`${themeMode} text-left transition-[box-shadow,transform] group-hover:-translate-y-px peer-focus-visible:ring-2 peer-focus-visible:ring-primary-400 ${cardClass}`}
+                        className={`${themeMode} text-left transition-[box-shadow,transform] group-hover:-translate-y-px peer-focus-visible:ring-2 peer-focus-visible:ring-accent-strong theme-brutal:peer-focus-visible:ring-soft-signal ${cardClass}`}
                         onClick={() => onThemeForModeChange(themeMode, option.id)}
                       >
                         <div className="p-3">
@@ -240,8 +242,8 @@ export function AppearanceThemePicker({
                               />
                               <div className="mt-2 flex items-center gap-1.5">
                                 <div
-                                  className={`size-3 bg-primary-400 ${
-                                    isBrutal ? "rounded-none" : "rounded-sm"
+                                  className={`size-3 ${
+                                    isBrutal ? "rounded-none bg-primary-400" : "rounded-sm bg-primary-soft"
                                   }`}
                                 />
                                 <div
@@ -250,8 +252,8 @@ export function AppearanceThemePicker({
                                   }`}
                                 />
                                 <div
-                                  className={`h-3 w-7 bg-accent-400 ${
-                                    isBrutal ? "rounded-none" : "rounded-sm"
+                                  className={`h-3 w-7 ${
+                                    isBrutal ? "rounded-none bg-accent-400" : "rounded-sm bg-accent-soft"
                                   }`}
                                 />
                               </div>
@@ -259,7 +261,13 @@ export function AppearanceThemePicker({
                           </div>
                           <div className="mt-2 flex items-center gap-2">
                             <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground-strong">{label}</span>
-                            {selected ? <Check size={14} className="shrink-0 text-primary-500" aria-hidden="true" /> : null}
+                            {selected ? (
+                              <Check
+                                size={14}
+                                className={`shrink-0 ${isBrutal ? "text-primary-500" : "text-accent-strong"}`}
+                                aria-hidden="true"
+                              />
+                            ) : null}
                           </div>
                         </div>
                       </div>
@@ -301,7 +309,7 @@ export function AppearanceThemePicker({
               />
               <Card
                 onClick={() => handleValueChange(option.value)}
-                className="h-full transition-[opacity,box-shadow,transform] group-hover:-translate-y-px group-hover:opacity-100 peer-focus-visible:ring-2 peer-focus-visible:ring-line-strong peer-data-checked:ring-2 peer-data-checked:ring-primary-400"
+                className="h-full transition-[opacity,box-shadow,transform] group-hover:-translate-y-px group-hover:opacity-100 peer-focus-visible:ring-2 peer-focus-visible:ring-line-strong peer-data-checked:ring-2 peer-data-checked:ring-accent-strong theme-brutal:peer-data-checked:ring-soft-signal"
               >
                 <CardContent className="space-y-2 p-3">
                   <div
@@ -312,15 +320,29 @@ export function AppearanceThemePicker({
                     <div className="h-full rounded border border-line-muted bg-layer-panel p-2 shadow-raft-xs">
                       <div className="h-1.5 w-3/5 rounded-full bg-foreground-muted/35" />
                       <div className="mt-2 flex items-center gap-1.5">
-                        <div className="size-3 rounded-sm bg-primary-400" />
+                        <div
+                          className={`size-3 rounded-sm ${
+                            option.family === "brutal" ? "bg-primary-400" : "bg-primary-soft"
+                          }`}
+                        />
                         <div className="h-1.5 flex-1 rounded-full bg-fill-muted" />
-                        <div className="h-3 w-7 rounded-sm bg-accent-400" />
+                        <div
+                          className={`h-3 w-7 rounded-sm ${
+                            option.family === "brutal" ? "bg-accent-400" : "bg-accent-soft"
+                          }`}
+                        />
                       </div>
                     </div>
                   </div>
                   <div className="flex min-w-0 items-center gap-2">
                     <CardTitle className="min-w-0 flex-1 truncate text-sm">{label}</CardTitle>
-                    {selected ? <Check size={14} className="shrink-0 text-primary-500" aria-hidden="true" /> : null}
+                    {selected ? (
+                      <Check
+                        size={14}
+                        className="shrink-0 text-accent-strong theme-brutal:text-primary-500"
+                        aria-hidden="true"
+                      />
+                    ) : null}
                   </div>
                   <CardDescription className="min-h-4 text-[11px]">
                     {selected

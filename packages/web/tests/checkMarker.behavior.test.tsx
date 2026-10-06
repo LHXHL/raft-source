@@ -18,7 +18,7 @@ test("CheckMarker renders square, circle, black-fill, and yellow-fill states", (
   assert.match(view.getByTestId("form").className, /size-4/);
   assert.match(view.getByTestId("form").className, /bg-foreground-strong text-foreground-inverse/);
   assert.match(view.getByTestId("list").className, /size-5/);
-  assert.match(view.getByTestId("list").className, /bg-primary text-primary-950/);
+  assert.match(view.getByTestId("list").className, /bg-primary-soft text-primary-strong/);
   assert.match(view.getByTestId("message").className, /rounded-full/);
-  assert.match(view.getByTestId("message").className, /bg-primary text-primary-950/);
+  assert.match(view.getByTestId("message").className, /bg-primary-soft text-primary-strong/);
 });

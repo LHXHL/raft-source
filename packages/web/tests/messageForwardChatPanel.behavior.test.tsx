@@ -4,6 +4,7 @@ import "./helpers/domSetup";
 import type { ReactNode } from "react";
 import { act, cleanup, fireEvent, render as rtlRender, screen, waitFor, within } from "@testing-library/react";
 import { TestIntlProvider } from "./helpers/intl";
+import { installForwardFoldMeasurementStub } from "./helpers/forwardFoldMeasurement";
 const render: typeof rtlRender = (ui, options) => rtlRender(ui, { wrapper: TestIntlProvider, ...options });
 import { MemoryRouter, useNavigate } from "react-router-dom";
 import { ToastProvider, toast } from "raft-ui";
@@ -27,6 +28,7 @@ import { useTaskStore } from "../src/store/taskStore";
 import { useThreadStore } from "../src/store/threadStore";
 
 const originalPost = api.post.bind(api);
+let restoreForwardFoldMeasurement: (() => void) | null = null;
 const originalGet = api.get.bind(api);
 const test = ((name: string, fn: Parameters<typeof nodeTest>[1]) =>
   nodeTest(name,  fn)) as typeof nodeTest;
@@ -363,6 +365,8 @@ afterEach(() => {
   api.get = originalGet as typeof api.get;
   api.post = originalPost as typeof api.post;
   window.matchMedia = defaultMatchMedia;
+  restoreForwardFoldMeasurement?.();
+  restoreForwardFoldMeasurement = null;
   HTMLElement.prototype.scrollIntoView = defaultScrollIntoView;
   if (defaultVisualViewport) {
     Object.defineProperty(window, "visualViewport", defaultVisualViewport);
@@ -993,11 +997,14 @@ test("forward composer sends canonical multi-target batches without an Open acti
 
 test("mobile Forward opens a full-page note and send step without a drawer", async () => {
   useMobileViewport();
+  restoreForwardFoldMeasurement = installForwardFoldMeasurementStub();
   const source = makeChannel();
   const target = makeChannel({ id: "mobile-target", name: "mobile-target" });
   const messages = Array.from({ length: 4 }, (_, index) => makeMessage({
     id: `mobile-source-${index}`,
-    content: `Mobile source ${index}`,
+    // Long enough to really overflow the eight-line fold in a browser; the
+    // stub below tells jsdom (which has no layout) the same.
+    content: `Mobile source ${index}. ${"Forwarded context sentence. ".repeat(8)}`,
     seq: index + 1,
   }));
 
@@ -1031,7 +1038,11 @@ test("mobile Forward opens a full-page note and send step without a drawer", asy
   const viewAll = screen.getByRole("button", { name: "View all 4 messages" });
   assert.ok(viewAll.querySelector("svg"), "View all should include its navigation icon");
   assert.doesNotMatch(notePage.textContent ?? "", /3 of 4 messages shown/);
-  assert.ok(screen.getByTestId("forwarded-bundle-fade"));
+  assert.equal(
+    notePage.querySelector('[data-collapsed="true"]')?.getAttribute("data-collapsed"),
+    "true",
+    "the preview card folds once the forwarded bodies really overflow",
+  );
   assert.equal(viewAll, notePage.querySelector('[data-testid="forwarded-bundle-toggle"]'));
   const scrollFlow = screen.getByTestId("forward-mobile-note-scroll");
   const noteLayout = screen.getByTestId("forward-mobile-note-layout");

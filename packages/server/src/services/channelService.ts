@@ -17,6 +17,7 @@ import {
   CONVERSATION_UNREAD_VIEW,
   type RisingWavePoolState,
   type RisingWaveInboxItemsServingVersion,
+  asRisingWaveOverload,
 } from "../db/risingwave";
 import {
   getConversationUnreadSourceOverride,
@@ -1726,7 +1727,7 @@ interface FollowedThreadsOptions {
   sort?: "asc" | "desc";
   /**
    * Internal: run the legacy all-Postgres list even when the active-follows
-   * RisingWave path (rw_followed_threads_v4) applies. For the path diff script
+   * RisingWave path (rw_followed_threads_v5) applies. For the path diff script
    * (scripts/followed-threads-path-diff.ts) and tests; no route sets it.
    */
   forceLegacyPath?: boolean;
@@ -2268,7 +2269,12 @@ async function backfillJointThreadProjectionsForLocalParent(
 }
 
 async function listActiveJointThreadProjectionRows(
-  input: { localThreadChannelId?: string; canonicalThreadChannelId?: string; serverId?: string },
+  input: {
+    localThreadChannelId?: string;
+    canonicalThreadChannelId?: string;
+    canonicalThreadChannelIds?: string[];
+    serverId?: string;
+  },
   executor: DatabaseExecutor = getDb(),
 ): Promise<JointThreadProjection[]> {
   const db = executor;
@@ -2295,6 +2301,7 @@ async function listActiveJointThreadProjectionRows(
   ];
   if (input.localThreadChannelId) filters.push(eq(jointChannelServers.localChannelId, input.localThreadChannelId));
   if (input.canonicalThreadChannelId) filters.push(eq(jointChannels.canonicalChannelId, input.canonicalThreadChannelId));
+  if (input.canonicalThreadChannelIds) filters.push(inArray(jointChannels.canonicalChannelId, input.canonicalThreadChannelIds));
   if (input.serverId) filters.push(eq(jointChannelServers.serverId, input.serverId));
 
   const rows = await db
@@ -2341,6 +2348,19 @@ export async function getActiveJointThreadProjectionsByCanonicalThread(
   executor: DatabaseExecutor = getDb(),
 ): Promise<JointThreadProjection[]> {
   return listActiveJointThreadProjectionRows({ canonicalThreadChannelId }, executor);
+}
+
+// One round trip for a whole page of canonical Threads, scoped to the local
+// Server. Same rows (and joined_at order) as calling
+// getActiveJointThreadProjectionsByCanonicalThread per id and keeping the
+// candidates whose localServerId is serverId.
+export async function getActiveJointThreadProjectionsByCanonicalThreadsForServer(
+  canonicalThreadChannelIds: string[],
+  serverId: string,
+  executor: DatabaseExecutor = getDb(),
+): Promise<JointThreadProjection[]> {
+  if (canonicalThreadChannelIds.length === 0) return [];
+  return listActiveJointThreadProjectionRows({ canonicalThreadChannelIds, serverId }, executor);
 }
 
 export async function getJointThreadProjectionForMember(
@@ -2764,25 +2784,40 @@ export async function resolveChannelAccess(input: {
   includeDeleted?: boolean;
   executor?: DatabaseExecutor;
 }): Promise<ChannelAccessResolution | null> {
-  const db = input.executor ?? getDb();
-  const channel = await getChannel(input.channelId, {
+  const resolved = await resolveChannelAccessMany({
+    serverId: input.serverId,
+    channelIds: [input.channelId],
     includeDeleted: input.includeDeleted,
-    executor: db,
+    executor: input.executor,
   });
-  if (!channel) return null;
-  if (channel.serverId !== input.serverId) return null;
+  return resolved.get(input.channelId) ?? null;
+}
 
-  if (channel.type !== "joint") {
-    return {
-      kind: "local",
-      localChannelId: channel.id,
-      canonicalChannelId: channel.id,
-      serverId: channel.serverId,
-      channel,
-    };
-  }
+/**
+ * resolveChannelAccess for many channel ids of one server in at most two
+ * queries (the channels, then the active projections of the joint ones). The
+ * single entry point of the local/joint access rule: a channel resolves when it
+ * exists (not deleted unless includeDeleted), belongs to `serverId`, and, for a
+ * joint channel, has an active projection in that server under an active joint.
+ * Ids that do not resolve are absent from the map.
+ */
+export async function resolveChannelAccessMany(input: {
+  serverId: string;
+  channelIds: readonly string[];
+  includeDeleted?: boolean;
+  executor?: DatabaseExecutor;
+}): Promise<Map<string, ChannelAccessResolution>> {
+  const resolved = new Map<string, ChannelAccessResolution>();
+  const channelIds = [...new Set(input.channelIds)];
+  if (channelIds.length === 0) return resolved;
+  const db = input.executor ?? getDb();
+  const conditions = [inArray(channels.id, channelIds)];
+  if (!input.includeDeleted) conditions.push(isNull(channels.deletedAt));
+  const channelRows = (await db.select().from(channels).where(and(...conditions)))
+    .filter((channel) => channel.serverId === input.serverId);
 
-  const [projection] = await db
+  const jointIds = channelRows.filter((channel) => channel.type === "joint").map((channel) => channel.id);
+  const projections = jointIds.length === 0 ? [] : await db
     .select({
       jointChannelId: jointChannelServers.jointChannelId,
       localChannelId: jointChannelServers.localChannelId,
@@ -2795,23 +2830,40 @@ export async function resolveChannelAccess(input: {
     .from(jointChannelServers)
     .innerJoin(jointChannels, eq(jointChannels.id, jointChannelServers.jointChannelId))
     .where(and(
-      eq(jointChannelServers.localChannelId, channel.id),
+      inArray(jointChannelServers.localChannelId, jointIds),
       eq(jointChannelServers.serverId, input.serverId),
       eq(jointChannelServers.status, "active"),
       eq(jointChannels.status, "active"),
     ));
+  const projectionByLocal = new Map<string, (typeof projections)[number]>();
+  for (const projection of projections) {
+    if (!projectionByLocal.has(projection.localChannelId)) projectionByLocal.set(projection.localChannelId, projection);
+  }
 
-  if (!projection) return null;
-
-  return {
-    kind: "joint",
-    localChannelId: projection.localChannelId,
-    canonicalChannelId: projection.canonicalChannelId,
-    jointChannelId: projection.jointChannelId,
-    localServerId: projection.localServerId,
-    role: projection.role,
-    channel,
-  };
+  for (const channel of channelRows) {
+    if (channel.type !== "joint") {
+      resolved.set(channel.id, {
+        kind: "local",
+        localChannelId: channel.id,
+        canonicalChannelId: channel.id,
+        serverId: channel.serverId,
+        channel,
+      });
+      continue;
+    }
+    const projection = projectionByLocal.get(channel.id);
+    if (!projection) continue;
+    resolved.set(channel.id, {
+      kind: "joint",
+      localChannelId: projection.localChannelId,
+      canonicalChannelId: projection.canonicalChannelId,
+      jointChannelId: projection.jointChannelId,
+      localServerId: projection.localServerId,
+      role: projection.role,
+      channel,
+    });
+  }
+  return resolved;
 }
 
 /**
@@ -7988,12 +8040,16 @@ type FollowedThreadStatsPostgresReason = "history_cutoff" | "activity_upper_boun
 type FollowedThreadStatsFallbackReason = "none" | FollowedThreadStatsPostgresReason;
 
 const RISINGWAVE_FOLLOWED_THREAD_STATS_CONTRACT_VERSION = 1;
-// The stats read is served by rw_followed_threads_v4 (072): v3's exact stats
+// The stats read is served by rw_followed_threads_v5 (074; v4's stats columns): v3's exact stats
 // columns (070: the unified chain's unread rule, a row for every follow state)
 // plus the parent/task columns the active path reads. One view serves both, so
 // v3 is no longer read and can be dropped once no running version reads it.
 // latest_preview is a 141-char prefix, enough for the 140-char preview.
-const RISINGWAVE_FOLLOWED_THREAD_STATS_VIEW = "rw_followed_threads_v4";
+const RISINGWAVE_FOLLOWED_THREAD_STATS_VIEW = "rw_followed_threads_v5";
+// TRANSITION (074): an environment whose RW has not built v5 yet still has v4,
+// with identical stats columns. A stats read that finds v5 missing reads v4
+// instead of failing the endpoint. Remove with v4 (DROP after v5 is everywhere).
+const RISINGWAVE_FOLLOWED_THREAD_STATS_TRANSITION_VIEW = "rw_followed_threads_v4";
 // This query is normally sub-100ms; 2s catches RW serving stalls without making
 // the trace stream noisy during ordinary latency variance.
 const RISINGWAVE_FOLLOWED_THREAD_STATS_SLOW_REPLAY_TRACE_MS = 2_000;
@@ -8071,6 +8127,7 @@ function buildRisingWaveFollowedThreadStatsReplayQuery(
   serverId: string,
   userId: string,
   threadChannelIds: string[],
+  view: string = RISINGWAVE_FOLLOWED_THREAD_STATS_VIEW,
 ): RisingWaveFollowedThreadStatsReplayQuery {
   const values = threadChannelIds.map((_, index) => `($${index + 3}::varchar)`).join(", ");
   return {
@@ -8086,7 +8143,7 @@ function buildRisingWaveFollowedThreadStatsReplayQuery(
           ELSE to_char(s.last_reply_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS.US') || '+00'
         END AS "lastReplyAt",
         s.latest_message_id::text AS "lastReplyMessageId",
-        -- Same tuple as lastReplyMessageId: rw_followed_threads_v4 joins
+        -- Same tuple as lastReplyMessageId: the view joins
         -- latest.seq = stats.latest_seq, so id and seq cannot describe
         -- different messages. Never splice these from separate sources.
         s.latest_seq::text AS "lastReplySeqExact",
@@ -8096,7 +8153,7 @@ function buildRisingWaveFollowedThreadStatsReplayQuery(
         s.first_unread_message_id::text AS "firstUnreadMessageId",
         COALESCE(s.unread_count, 0)::int AS "unreadCount"
       FROM input_threads i
-      JOIN ${RISINGWAVE_FOLLOWED_THREAD_STATS_VIEW} s
+      JOIN ${view} s
         ON s.server_id = $1
        AND s.user_id = $2
        AND s.thread_channel_id = i.thread_channel_id
@@ -8155,7 +8212,7 @@ async function getFollowedThreadStatsFromRisingWave(
   traceQuery: DbQueryTracer,
   historyCutoffPresent: boolean,
 ): Promise<FollowedThreadStatsRow[]> {
-  // CONTRACT: rw_followed_threads_v4 is an endpoint-shaped serving read
+  // CONTRACT: rw_followed_threads_v5 is an endpoint-shaped serving read
   // model for GET /api/channels/threads/followed and the Done / Activity
   // followed-thread lists, for every follow state. It must return all stats
   // fields in one lookup keyed by (server_id, user_id, thread_channel_id). Do
@@ -8166,23 +8223,48 @@ async function getFollowedThreadStatsFromRisingWave(
   if (!client) throw new RisingWaveNotConfiguredError("followed-thread stats");
 
   const threadIds = threads.map((thread) => thread.threadChannelId);
-  const replayQuery = buildRisingWaveFollowedThreadStatsReplayQuery(serverId, userId, threadIds);
-  const queryStart = performance.now();
-  const result = await traceQuery(
-    RISINGWAVE_FOLLOWED_THREAD_STATS_QUERY_NAME,
-    () => client.query(replayQuery.sql, replayQuery.params),
-    (queryResult) => ({
-      ...followedThreadStatsTraceAttrs("rw_mv", "none"),
+  let view = RISINGWAVE_FOLLOWED_THREAD_STATS_VIEW;
+  const readStats = async () => {
+    const replayQuery = buildRisingWaveFollowedThreadStatsReplayQuery(serverId, userId, threadIds, view);
+    const queryStart = performance.now();
+    const result = await traceQuery(
+      RISINGWAVE_FOLLOWED_THREAD_STATS_QUERY_NAME,
+      () => client.query(replayQuery.sql, replayQuery.params).catch((error: unknown) => {
+        throw asRisingWaveOverload(error);
+      }),
+      (queryResult) => ({
+        ...followedThreadStatsTraceAttrs("rw_mv", "none"),
+        backend: "risingwave",
+        rw_followed_thread_stats_view: view,
+        followed_threads_count: threads.length,
+        stats_rows_count: queryResult.rows.length,
+        // A cutoff no longer reroutes to Postgres; it only withholds old previews.
+        history_cutoff_present: historyCutoffPresent,
+      }),
+    );
+    recordSlowRisingWaveFollowedThreadStatsReplayQuery(performance.now() - queryStart, replayQuery, result.rows.length);
+    return result.rows as FollowedThreadStatsRow[];
+  };
+  try {
+    return await readStats();
+  } catch (error) {
+    // TRANSITION (074): v5 not built in this RW yet -> v4 (same stats columns).
+    if (!isMissingRelationError(error, RISINGWAVE_FOLLOWED_THREAD_STATS_VIEW)) throw error;
+    addTraceEvent("followed_threads.stats_backend.view_fallback", {
       backend: "risingwave",
-      rw_followed_thread_stats_view: RISINGWAVE_FOLLOWED_THREAD_STATS_VIEW,
-      followed_threads_count: threads.length,
-      stats_rows_count: queryResult.rows.length,
-      // A cutoff no longer reroutes to Postgres; it only withholds old previews.
-      history_cutoff_present: historyCutoffPresent,
-    }),
-  );
-  recordSlowRisingWaveFollowedThreadStatsReplayQuery(performance.now() - queryStart, replayQuery, result.rows.length);
-  return result.rows as FollowedThreadStatsRow[];
+      missing_view: RISINGWAVE_FOLLOWED_THREAD_STATS_VIEW,
+      rw_followed_thread_stats_view: RISINGWAVE_FOLLOWED_THREAD_STATS_TRANSITION_VIEW,
+    });
+    view = RISINGWAVE_FOLLOWED_THREAD_STATS_TRANSITION_VIEW;
+    return readStats();
+  }
+}
+
+/** A "relation <name> does not exist" error (Postgres / RisingWave pgwire, SQLSTATE 42P01 when present). */
+function isMissingRelationError(error: unknown, relation: string): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  const code = (error as { code?: unknown } | null)?.code;
+  return message.includes(relation) && (code === "42P01" || /does not exist|not found/i.test(message));
 }
 
 /**
@@ -8201,7 +8283,7 @@ export async function getFollowedThreadStatsFromPostgres(
 ): Promise<FollowedThreadStatsRow[]> {
   const cutoffCondition = historyCutoff ? sql` AND m.created_at > ${historyCutoff}` : sql``;
   // The unified chain's unread rule (rw_inbox_normal_v4, 063-unified-inbox-chain.sql),
-  // identical to rw_followed_threads_v4 (v3's rule): after the cursor, not own-sent, not
+  // identical to rw_followed_threads_v5 (v3's rule): after the cursor, not own-sent, not
   // a system message the user caused (NULL causal actor = no exclusion), not a
   // noise subtype. These reads serve the documented RW gaps, so they must not
   // reintroduce the pre-063 rule.
@@ -8455,7 +8537,7 @@ type FollowedThreadSourceRow = {
 };
 
 /**
- * One rw_followed_threads_v4 row (infra/risingwave/sql/072-followed-threads-v4.sql)
+ * One rw_followed_threads_v5 row (infra/risingwave/sql/074-followed-threads-v5.sql)
  * as the server reads it: v3's stats columns (FollowedThreadStatsRow) plus the
  * parent message and its task. lastReplyContent and parentMessageContent are
  * 141-character prefixes (enough for the 140/100-character previews). The
@@ -8478,6 +8560,10 @@ export type FollowedThreadRwRow = FollowedThreadStatsRow & {
   taskStatus: string | null;
   taskClaimedByType: "agent" | "user" | null;
   taskClaimedById: string | null;
+  /** v5: the followed thread is a local projection of a joint thread. */
+  jointProjection: boolean;
+  /** v5: this server's local joint channel of the canonical parent channel (joint projections). */
+  jointParentChannelId: string | null;
 };
 
 type FollowedThreadsState = NonNullable<FollowedThreadsOptions["state"]>;
@@ -8509,11 +8595,11 @@ type LoadedFollowedThreads = {
   readStateByThread: Map<string, ReadStateSnapshot>;
 };
 
-const RISINGWAVE_FOLLOWED_THREADS_VIEW = "rw_followed_threads_v4";
+const RISINGWAVE_FOLLOWED_THREADS_VIEW = "rw_followed_threads_v5";
 const RISINGWAVE_FOLLOWED_THREADS_QUERY_NAME = "channels.followed_threads_rw_rows";
 
 /**
- * The single lookup of the RW followed-threads path: every rw_followed_threads_v4
+ * The single lookup of the RW followed-threads path: every rw_followed_threads_v5
  * row of (server, user), on the lookup index prefix. The view holds every follow
  * state; the caller keeps only the Postgres follow set.
  */
@@ -8549,7 +8635,9 @@ export const RISINGWAVE_FOLLOWED_THREADS_ROWS_SQL = `
         v.task_number::int AS "taskNumber",
         v.task_status AS "taskStatus",
         v.task_claimed_by_type AS "taskClaimedByType",
-        v.task_claimed_by_id AS "taskClaimedById"
+        v.task_claimed_by_id AS "taskClaimedById",
+        COALESCE(v.joint_projection, FALSE) AS "jointProjection",
+        v.joint_parent_channel_id::text AS "jointParentChannelId"
       FROM ${RISINGWAVE_FOLLOWED_THREADS_VIEW} v
       WHERE v.server_id = $1
         AND v.user_id = $2
@@ -8568,12 +8656,10 @@ function followedThreadsLegacyReason(ctx: FollowedThreadsQueryContext): Followed
 
 /**
  * The Postgres regular-thread list (threads whose parent message is in this
- * server). `threadIds` restricts it to those thread channels: the RW path uses
- * that for followed threads RisingWave has not caught up with yet.
+ * server).
  */
 async function queryFollowedRegularThreads(
   ctx: FollowedThreadsQueryContext,
-  threadIds?: string[],
 ): Promise<FollowedThreadSourceRow[]> {
   const { serverId, userId, db, traceQuery, guestAccess, state, opts } = ctx;
   const searchPattern = opts?.q ? `%${opts.q}%` : null;
@@ -8642,7 +8728,6 @@ async function queryFollowedRegularThreads(
         eq(threadFollows.followerId, userId),
         doneCondition,
         followCondition,
-        threadIds ? inArray(channels.id, threadIds) : undefined,
         eq(parentChannels.serverId, serverId),
         guestInboxAccessSql(guestAccess, sql`${parentChannels.id}`),
         isNull(parentChannels.archivedAt),
@@ -8686,9 +8771,6 @@ async function queryFollowedRegularThreads(
           )
           .limit(opts?.maxRows ?? 101)
       : regularThreadsQuery,
-    threadIds
-      ? (rows) => ({ thread_ids_filter_count: threadIds.length, threads_count: rows.length })
-      : undefined,
   );
 }
 
@@ -8944,7 +9026,10 @@ async function loadActiveFollowedThreadsFromRisingWave(
 
   // Partition the follow set by what RW knows about each thread.
   const rwByThread = new Map(rw.rows.map((row) => [row.threadChannelId, row]));
+  // Joint projections are served like regular threads, with this server's local
+  // joint channel as the parent channel (v5's joint_parent_channel_id).
   const rwRegular: FollowedThreadRwRow[] = [];
+  const jointThreadIds = new Set<string>();
   const missingIds: string[] = [];
   let nonRegularCount = 0;
   for (const threadChannelId of followedIds) {
@@ -8952,10 +9037,21 @@ async function loadActiveFollowedThreadsFromRisingWave(
     if (!row) {
       // CDC lag: followed in Postgres, not in the view yet.
       missingIds.push(threadChannelId);
+    } else if (row.jointProjection) {
+      if (row.parentMessageId == null || row.parentMessageCreatedAt == null) {
+        // The canonical parent message has not reached RW yet: CDC lag.
+        missingIds.push(threadChannelId);
+      } else if (row.jointParentChannelId == null) {
+        // No active projection of the canonical parent channel in this server:
+        // not visible here (the Postgres joint query's parent_projection join).
+        nonRegularCount += 1;
+      } else {
+        jointThreadIds.add(threadChannelId);
+        rwRegular.push({ ...row, parentChannelId: row.jointParentChannelId });
+      }
     } else if (row.parentMessageId == null || (row.parentServerId != null && row.parentServerId !== serverId)) {
-      // A joint projection (no local parent message) or a parent in another
-      // server: never a regular thread of this server; the joint query serves
-      // the joint ones.
+      // No parent message, or a parent in another server: never a thread of
+      // this server's channels.
       nonRegularCount += 1;
     } else if (row.parentServerId == null || row.parentChannelId == null || row.parentMessageCreatedAt == null) {
       // The parent message (or its channel) has not reached RW yet: CDC lag.
@@ -9004,7 +9100,14 @@ async function loadActiveFollowedThreadsFromRisingWave(
         && (channel.type === "channel" || channel.member))
       .map((channel) => [channel.id, channel]),
   );
-  const rwVisible = rwRegular.filter((row) => visibleParentById.has(row.parentChannelId!));
+  // A joint thread's parent must be the local joint channel, and (joint channels
+  // are not public) the user a member of it: the joint query's local_parent /
+  // parent_member rule.
+  const rwVisible = rwRegular.filter((row) => {
+    const parentChannel = visibleParentById.get(row.parentChannelId!);
+    if (!parentChannel) return false;
+    return !jointThreadIds.has(row.threadChannelId) || parentChannel.type === "joint";
+  });
   const rwThreads: FollowedThreadSourceRow[] = rwVisible.map((row) => {
     const parentChannel = visibleParentById.get(row.parentChannelId!)!;
     return {
@@ -9030,12 +9133,11 @@ async function loadActiveFollowedThreadsFromRisingWave(
     };
   });
 
-  const missingThreads = missingIds.length === 0 ? [] : await queryFollowedRegularThreads(ctx, missingIds);
-  const jointThreads = followedIds.length === 0 ? [] : await queryFollowedJointThreads(ctx);
-  const legacyThreads = [...missingThreads, ...jointThreads];
-
+  // Threads RW has not caught up with yet (CDC lag, seconds) are left out, not
+  // filled from Postgres: they show up on the next read. rw_missing_threads
+  // below keeps them visible in traces.
   addTraceEvent("followed_threads.source_selected", {
-    followed_threads_source: "rw_v4",
+    followed_threads_source: "rw_v5",
     rw_followed_threads_view: RISINGWAVE_FOLLOWED_THREADS_VIEW,
     followed_threads_count: followedIds.length,
     rw_rows_count: rw.rows.length,
@@ -9043,12 +9145,10 @@ async function loadActiveFollowedThreadsFromRisingWave(
     rw_hidden_threads: rwRegular.length - rwVisible.length,
     rw_non_regular_threads: nonRegularCount,
     rw_missing_threads: missingIds.length,
-    legacy_regular_threads: missingThreads.length,
-    joint_threads: jointThreads.length,
+    joint_threads: rwVisible.filter((row) => jointThreadIds.has(row.threadChannelId)).length,
   });
 
-  // Stats: the RW row itself for RW regular threads (no second RW read); v3 for
-  // the rest, as before.
+  // Stats: the RW row itself (no second RW read).
   const rwStatsRows: FollowedThreadStatsRow[] = rwVisible.map((row) => ({
     threadChannelId: row.threadChannelId,
     replyCount: row.replyCount,
@@ -9061,17 +9161,9 @@ async function loadActiveFollowedThreadsFromRisingWave(
     firstUnreadMessageId: row.firstUnreadMessageId,
     unreadCount: row.unreadCount,
   }));
-  const legacyStatsRows = legacyThreads.length === 0 ? [] : await getFollowedThreadStatsRows(
-    serverId,
-    userId,
-    legacyThreads.map((thread) => ({ ...thread, activityUpperBoundSeq: null })),
-    historyCutoff,
-    traceQuery,
-  );
-
-  // Read state. RW regular threads: the cursor by primary key, plus the RW
-  // latest message as the content frontier, through the same snapshot mapping
-  // as the authority read (fetchReadStateAuthorityRows). The rest: that read.
+  // Read state: the cursor by primary key, plus the RW latest message as the
+  // content frontier, through the same snapshot mapping as the authority read
+  // (fetchReadStateAuthorityRows).
   const rwThreadIds = rwVisible.map((row) => row.threadChannelId);
   const cursorRows = rwThreadIds.length === 0 ? [] : (await traceQuery(
     "channels.followed_threads.read_cursors",
@@ -9100,17 +9192,10 @@ async function loadActiveFollowedThreadsFromRisingWave(
       doneFrontierSeq: row.lastReplySeqExact ?? row.parentMessageSeq,
     }));
   }
-  const legacyReadStates = await attachReadState(
-    legacyThreads.map((thread) => ({ id: thread.threadChannelId })),
-    userId,
-    db,
-    traceQuery,
-  );
-  for (const readState of legacyReadStates) readStateByThread.set(readState.id, readState);
 
   return {
-    threads: [...rwThreads, ...legacyThreads],
-    statsRows: [...rwStatsRows, ...legacyStatsRows],
+    threads: rwThreads,
+    statsRows: rwStatsRows,
     readStateByThread,
   };
 }

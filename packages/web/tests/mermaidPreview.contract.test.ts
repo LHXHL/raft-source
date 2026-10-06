@@ -306,7 +306,19 @@ test("shared mermaid renderer is explicitly enabled on message and document surf
 
   const forwarded = read("src/components/message/ForwardedBundleCard.tsx");
   assert.match(forwarded, /<MarkdownContent source=\{content\} density="compact" enableMermaid/);
-  assert.match(forwarded, /max-h-\[144px\] overflow-clip/, "collapsed forwards must clip without becoming a sticky scroll root");
+  // The clamp used to be pinned here with its rationale: a collapsed forward
+  // must clip without becoming a sticky scroll root, because mermaid action
+  // bars are position: sticky (slock #5595 switched that line to
+  // overflow-clip for exactly this). The clamp now lives in raft-ui, which
+  // pins the behaviour itself: the rui browser suite asserts the collapsed
+  // container's computed overflow is "clip" (raft-ui #347). The app keeps the
+  // delegation pin so a local re-implementation cannot creep back.
+  assert.match(forwarded, /<MessageForwardedBundleItems/, "the fold renders through raft-ui");
+  assert.doesNotMatch(
+    forwarded,
+    /max-h-\[144px\]/,
+    "the clamp lives in raft-ui now and is asserted there; the app card must not re-implement it",
+  );
   const comments = read("src/components/message/AttachmentCommentsPanel.tsx");
   assert.match(comments, /<MarkdownContent source=\{c\.content\} density="compact" enableMermaid/);
   const collapsible = read("src/components/message/CollapsibleMessageContent.tsx");

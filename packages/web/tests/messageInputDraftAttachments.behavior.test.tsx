@@ -193,9 +193,11 @@ function setupComposer(
     userId?: string;
     overrides?: Partial<ComponentProps<typeof MessageInput>>;
     wrap?: (ui: ReactElement) => ReactElement;
+    onGet?: (url: string) => void;
   } = {},
 ) {
   api.get = (async (url: string) => (
+    options.onGet?.(url),
     url === "/attachments/upload-capabilities"
       ? {
           data: {
@@ -561,6 +563,35 @@ test("lazy thread adopts its pending text and attachment draft when the first ex
   });
   assert.equal(textarea.value, "unsent draft survives first reply");
   assert.ok(screen.getByAltText("draft-adoption.png"));
+});
+
+test("a lazy thread composer looks up recoverable uploads only once its channel exists (task #18)", async () => {
+  // Before the first reply, `channelId` is a draft key (`pending-thread:…`) and
+  // `resolveChannelId` creates the channel on send. Upload sessions belong to a
+  // real channel, so asking for `/attachments/upload-sessions/pending-thread:…`
+  // was a guaranteed 400 on staging.
+  const pendingChannelId = "pending-thread:parent-recoverable";
+  const durableChannelId = "thread-channel-recoverable";
+  const gets: string[] = [];
+  const view = setupComposer(makeSendSpy(), {
+    channelId: pendingChannelId,
+    overrides: { resolveChannelId: async () => durableChannelId },
+    onGet: (url) => gets.push(url),
+  });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+  assert.deepEqual(
+    gets.filter((url) => url.includes("/upload-sessions/")),
+    [],
+    "no recoverable-upload lookup for a channel that does not exist yet",
+  );
+
+  await act(async () => {
+    view.rerender(renderComposer(durableChannelId, "full", { migrateDraftFromChannelId: pendingChannelId }));
+  });
+  await waitFor(() => assert.ok(
+    gets.some((url) => url.includes(`/upload-sessions/${durableChannelId}/active`)),
+    "the lookup runs once the thread channel exists",
+  ));
 });
 
 test("live thread adoption keeps an intentionally empty pending composer from resurrecting a stale durable draft", async () => {

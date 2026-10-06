@@ -133,7 +133,7 @@ function StepRail({ stage }: { stage: SlackBridgeSetupStage }) {
         <li
           key={item}
           className={`rounded-md border border-line-muted px-2 py-1 text-center text-[10px] font-bold uppercase tracking-wide theme-brutal:rounded-none theme-brutal:border-black ${
-            index < activeIndex ? "bg-success-soft theme-brutal:bg-brutal-lime/40" : index === activeIndex ? "bg-accent-400 text-accent-950 theme-brutal:bg-brutal-pink theme-brutal:text-black" : "bg-layer-panel text-foreground-hint theme-brutal:bg-white theme-brutal:text-black/45"
+            index < activeIndex ? "bg-success-soft theme-brutal:bg-brutal-lime/40" : index === activeIndex ? "bg-accent-soft text-accent-strong theme-brutal:bg-brutal-pink theme-brutal:text-black" : "bg-layer-panel text-foreground-hint theme-brutal:bg-white theme-brutal:text-black/45"
           }`}
           aria-current={item === current ? "step" : undefined}
         >

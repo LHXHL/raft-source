@@ -244,7 +244,7 @@ test("experimental labels remain on explicit experimental features and stay off 
     "function AppNotificationsEyebrow()",
     "export function AppNotificationPermissionPicker(",
   );
-  assert.match(appNotificationsEyebrow, /settings\.connectedApps\.section\.appNotifications/);
+  assert.match(appNotificationsEyebrow, /settings\.connectedApps\.section\.webhook/);
   assert.match(appNotificationsEyebrow, /<SectionEyebrow as="div">\{formatMessage/);
   assert.match(appNotificationsEyebrow, /<Badge\.Experimental\s*\/>/);
 

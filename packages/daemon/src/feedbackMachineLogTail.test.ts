@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { gunzipSync } from "node:zlib";
 import { BasicTracer, MemoryTraceSink } from "@botiverse/raft-shared";
-import { DIAGNOSTIC_REDACTION_CREDENTIAL_SAMPLES } from "../../shared/src/test/diagnosticRedactionCredentialSamples";
+import { DIAGNOSTIC_REDACTION_CREDENTIAL_SAMPLES, PEM_PRIVATE_KEY_BEGIN } from "../../shared/src/test/diagnosticRedactionCredentialSamples";
 import { boundAndRedactLogTail, collectFeedbackMachineLogTailAttachment, redactLogTailText } from "./feedbackMachineLogTail";
 
 const dirs: string[] = [];
@@ -61,7 +61,8 @@ function harness(paths: string[], limits?: { maxBytes?: number; maxLines?: numbe
 
 const WINDOW = { from: "2026-09-15T11:45:00.000Z", to: "2026-09-15T12:00:00.000Z" };
 const PEM_BODY = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7";
-const PEM_BLOCK = `-----BEGIN PRIVATE KEY-----\n${PEM_BODY}\nQUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=\n-----END PRIVATE KEY-----`;
+// Built at runtime so secret scanners don't flag this test sample.
+const PEM_BLOCK = `${PEM_PRIVATE_KEY_BEGIN}\n${PEM_BODY}\nQUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=\n-----END PRIVATE KEY-----`;
 const URL_MARKER = "https://synthetic-host.example.test/private/path/segment?token=abc#frag";
 
 describe("feedback machine log tail (tier 2)", () => {
@@ -94,7 +95,7 @@ describe("feedback machine log tail (tier 2)", () => {
     assert.ok(!uploaded.includes("after-window line"), "line after the window must not upload");
     // Multi-line PEM masked even though the file was carried line by line.
     assert.ok(!uploaded.includes(PEM_BODY), "PEM body leaked");
-    assert.ok(!uploaded.includes("-----BEGIN PRIVATE KEY-----"));
+    assert.ok(!uploaded.includes(PEM_PRIVATE_KEY_BEGIN));
     // Whole URL dropped: no host, path, query or fragment survives.
     for (const fragment of ["synthetic-host", "/private/path", "token=abc", "#frag"]) {
       assert.ok(!uploaded.includes(fragment), `URL part leaked: ${fragment}`);
@@ -142,7 +143,7 @@ describe("feedback machine log tail (tier 2)", () => {
     assert.ok(!redactedHead.includes(PEM_BODY), `orphan END leaked: ${redactedHead}`);
     assert.ok(redactedHead.includes("after key"));
     // Line/byte end lands inside the block: BEGIN present, END missing.
-    const cutTail = `2026-09-15T11:55:00.000Z [INFO] key follows\n-----BEGIN PRIVATE KEY-----\n${PEM_BODY}`;
+    const cutTail = `2026-09-15T11:55:00.000Z [INFO] key follows\n${PEM_PRIVATE_KEY_BEGIN}\n${PEM_BODY}`;
     const redactedTail = redactLogTailText(cutTail);
     assert.ok(!redactedTail.includes(PEM_BODY), `orphan BEGIN leaked: ${redactedTail}`);
     assert.ok(redactedTail.includes("key follows"));

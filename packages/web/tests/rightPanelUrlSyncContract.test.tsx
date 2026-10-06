@@ -4,6 +4,7 @@ const {
   beginRightPanelSearchTransition,
   hasRightPanelThreadAnchorChanged,
   isCurrentRightPanelSearchSnapshot,
+  openThreadParentMessageRoute,
   subscribeRightPanelThreadAnchor,
   syncRightPanelStoresFromSearch,
   syncRightPanelUrlFromStores,
@@ -748,6 +749,127 @@ test("View in channel reserves URL ownership and completes the thread teardown s
 
   installWindowLocation("/s/acme/channel/channel-1", "?msg=parent-1");
   assert.equal(isCurrentRightPanelSearchSnapshot("?msg=parent-1"), true);
+});
+
+test("desktop View in channel pushes and blocks stale thread snapshots before route commit", () => {
+  resetStores();
+  installWindowHistoryEntry(
+    "/s/acme/channel/channel-1",
+    "?thread=channel-1%3Aparent-1",
+    { idx: 4, key: "origin-thread" },
+  );
+  useThreadStore.setState({
+    openParentChannelId: "channel-1",
+    openParentMessageId: "parent-1",
+    openThreadChannelId: "thread-1",
+  });
+  const navigations: Array<{ to: string; replace: boolean }> = [];
+  const mobileBackRecords: Array<{ type: "PUSH" | "REPLACE"; path: string }> = [];
+
+  openThreadParentMessageRoute({
+    isDesktop: true,
+    parentRouteKind: "channel",
+    parentChannelId: "channel-1",
+    parentMessageId: "parent-1",
+    serverSlug: "acme",
+    navigate: (to, options) => {
+      navigations.push({ to, replace: options.replace });
+      installWindowHistoryEntry(
+        "/s/acme/channel/channel-1",
+        "?msg=parent-1",
+        { idx: 5, key: "parent-message" },
+      );
+    },
+    recordMobileBackNavigation: (type, path) => {
+      mobileBackRecords.push({ type, path });
+    },
+  });
+
+  assert.deepEqual(navigations, [
+    { to: "/s/acme/channel/channel-1?msg=parent-1", replace: false },
+  ]);
+  assert.deepEqual(mobileBackRecords, []);
+  assert.equal(useThreadStore.getState().openParentMessageId, null);
+  assert.equal(
+    isCurrentRightPanelSearchSnapshot("?thread=channel-1%3Aparent-1"),
+    false,
+    "the stale thread snapshot must not regain ownership after the desktop push",
+  );
+  assert.equal(isCurrentRightPanelSearchSnapshot("?msg=parent-1"), true);
+});
+
+test("desktop DM View in channel keeps push semantics and closes the thread", () => {
+  resetStores();
+  installWindowHistoryEntry(
+    "/s/acme/dm/dm-1",
+    "?thread=dm-1%3Aparent-1",
+    { idx: 7, key: "origin-dm-thread" },
+  );
+  useThreadStore.setState({
+    openParentChannelId: "dm-1",
+    openParentMessageId: "parent-1",
+    openThreadChannelId: "thread-1",
+  });
+  const navigations: Array<{ to: string; replace: boolean }> = [];
+  const mobileBackRecords: Array<{ type: "PUSH" | "REPLACE"; path: string }> = [];
+
+  openThreadParentMessageRoute({
+    isDesktop: true,
+    parentRouteKind: "dm",
+    parentChannelId: "dm-1",
+    parentMessageId: "parent-1",
+    serverSlug: "acme",
+    navigate: (to, options) => {
+      navigations.push({ to, replace: options.replace });
+    },
+    recordMobileBackNavigation: (type, path) => {
+      mobileBackRecords.push({ type, path });
+    },
+  });
+
+  assert.deepEqual(navigations, [
+    { to: "/s/acme/dm/dm-1?msg=parent-1", replace: false },
+  ]);
+  assert.deepEqual(mobileBackRecords, []);
+  assert.equal(useThreadStore.getState().openParentMessageId, null);
+});
+
+test("mobile View in channel replaces and records mobile back state", () => {
+  resetStores();
+  installWindowHistoryEntry(
+    "/s/acme/activity",
+    "?open=channel%3Achannel-1&thread=channel-1%3Aparent-1",
+    { idx: 9, key: "activity-thread" },
+  );
+  useThreadStore.setState({
+    openParentChannelId: "channel-1",
+    openParentMessageId: "parent-1",
+    openThreadChannelId: "thread-1",
+  });
+  const navigations: Array<{ to: string; replace: boolean }> = [];
+  const mobileBackRecords: Array<{ type: "PUSH" | "REPLACE"; path: string }> = [];
+
+  openThreadParentMessageRoute({
+    isDesktop: false,
+    parentRouteKind: "channel",
+    parentChannelId: "channel-1",
+    parentMessageId: "parent-1",
+    serverSlug: "acme",
+    navigate: (to, options) => {
+      navigations.push({ to, replace: options.replace });
+    },
+    recordMobileBackNavigation: (type, path) => {
+      mobileBackRecords.push({ type, path });
+    },
+  });
+
+  assert.deepEqual(navigations, [
+    { to: "/s/acme/channel/channel-1?msg=parent-1", replace: true },
+  ]);
+  assert.deepEqual(mobileBackRecords, [
+    { type: "REPLACE", path: "/s/acme/channel/channel-1?msg=parent-1" },
+  ]);
+  assert.equal(useThreadStore.getState().openParentMessageId, null);
 });
 
 test("right-panel URL subscription reacts only to thread anchor ownership changes", () => {

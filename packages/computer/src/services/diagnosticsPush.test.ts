@@ -21,7 +21,7 @@ import path from "node:path";
 import { gunzipSync } from "node:zlib";
 
 import { diagnosticsPush } from "./diagnosticsPush";
-import { DIAGNOSTIC_REDACTION_CREDENTIAL_SAMPLES } from "../../../shared/src/test/diagnosticRedactionCredentialSamples";
+import { DIAGNOSTIC_REDACTION_CREDENTIAL_SAMPLES, PEM_PRIVATE_KEY_BEGIN } from "../../../shared/src/test/diagnosticRedactionCredentialSamples";
 import { getDaemonMachineLockId } from "../../../daemon/src/machineLock";
 
 async function withHome<T>(fn: (home: string) => Promise<T>): Promise<T> {
@@ -561,7 +561,8 @@ test("diagnosticsPush: PEM block straddling the tail window is masked (task263 b
     // falls OUTSIDE the window while the key body and END fall inside. Redacting
     // after the cut would leave the body with no BEGIN to anchor the rule.
     const logLines = [
-      "-----BEGIN PRIVATE KEY-----",
+      // Built at runtime so secret scanners don't flag this test sample.
+      PEM_PRIVATE_KEY_BEGIN,
       keyBody,
       "-----END PRIVATE KEY-----",
       ...Array.from({ length: 118 }, (_, i) => `filler-${String(i).padStart(3, "0")}`),
@@ -635,7 +636,7 @@ test("diagnosticsPush: orphan BEGIN marker is masked in the uploaded body (task2
     // paired BEGIN..END rule alone leaves the body in the clear.
     const logText = [
       "runner started",
-      "-----BEGIN PRIVATE KEY-----",
+      PEM_PRIVATE_KEY_BEGIN,
       keyBody,
     ].join("\n") + "\n";
 

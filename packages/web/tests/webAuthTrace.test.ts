@@ -966,3 +966,56 @@ test("a flush call that finds one in flight never starts a parallel flush (task 
     __resetAuthTraceForTest();
   }
 });
+
+test("scheduled flushes reuse one attestation per server+principal until it nears expiry (task #17)", async () => {
+  __resetAuthTraceForTest({ traceUrl: "https://trace.example.test" });
+  setAuthTraceServerIdGetter(() => "server-abc");
+  let principalId = "user-a";
+  setAuthTracePrincipalIdGetter(() => principalId);
+  const ls = stubLocalStorage({ slock_access_token: "tok" });
+  let expiresInMs = 10 * 60 * 1000;
+  let traceStatus = 200;
+  const urls: string[] = [];
+  try {
+    setAuthTraceFetchForTest(async (input) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      urls.push(url);
+      if (url.endsWith("/scope-attestation")) {
+        return jsonResponse({ attestation: `att-${urls.length}`, expiresAt: new Date(Date.now() + expiresInMs).toISOString() });
+      }
+      return jsonResponse({ ok: true }, traceStatus);
+    });
+    const flushOne = async () => { emitAuthTrace("slock.auth.boot_init"); await flushAuthTraces(); };
+    const attestations = () => urls.filter((url) => url.endsWith("/scope-attestation")).length;
+    const uploads = () => urls.filter((url) => url.endsWith("/api/web-traces")).length;
+
+    await flushOne();
+    await flushOne();
+    await flushOne();
+    assert.equal(uploads(), 3, "every batch is still uploaded");
+    assert.equal(attestations(), 1, "a valid attestation is reused across batches");
+
+    principalId = "user-b";
+    await flushOne();
+    assert.equal(attestations(), 2, "a different principal never reuses another principal's attestation");
+
+    traceStatus = 401;
+    await flushOne();
+    traceStatus = 200;
+    await flushOne();
+    assert.equal(attestations(), 3, "a receiver rejection drops the cached attestation");
+
+    expiresInMs = 30_000; // inside the reuse margin
+    principalId = "user-c"; // force a fresh (short-lived) attestation
+    await flushOne();
+    assert.equal(attestations(), 4);
+    await flushOne();
+    assert.equal(attestations(), 5, "an attestation close to expiry is not reused");
+  } finally {
+    ls.restore();
+    setAuthTraceFetchForTest(null);
+    setAuthTraceServerIdGetter(() => undefined);
+    setAuthTracePrincipalIdGetter(() => undefined);
+    __resetAuthTraceForTest();
+  }
+});

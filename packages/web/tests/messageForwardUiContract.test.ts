@@ -139,9 +139,21 @@ test("forwarded bundle projection is display-safe and keeps attachment authority
   assert.match(card, /data-testid="forwarded-bundle-source-label"/);
   assert.match(card, /data-testid="forwarded-bundle-toggle"/);
   assert.match(card, /message\.forwardedBundle\.viewAll/);
+  assert.match(
+    card,
+    /expandedContent=/,
+    "the action labels the expanded state through raft-ui's expandedContent",
+  );
   assert.match(card, /message\.forwardedBundle\.collapse/);
   assert.match(card, /<MarkdownContent source=\{content\} density="compact" enableMermaid \/>/);
-  assert.match(card, /max-h-\[144px\] overflow-clip/);
+  assert.doesNotMatch(
+    card,
+    /max-h-\[144px\]/,
+    "the fold clamp lives in raft-ui; the card must not re-implement it",
+  );
+  assert.match(card, /<MessageForwardedBundleGallery/);
+  assert.match(card, /<MessageForwardedBundleItemContent/);
+  assert.doesNotMatch(card, /ForwardedBundleImageStrip/);
   assert.match(card, /data-testid="forwarded-bundle-toggle"/);
   assert.doesNotMatch(card, /storageKey|presigned|authorization/i);
   assert.match(item, /isForwardedBundleMetadata\(actionMetadata\)/);

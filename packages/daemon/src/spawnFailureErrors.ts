@@ -92,11 +92,14 @@ export class RuntimeConfigInvalidError extends Error {
 export class RuntimeExecutableNotFoundError extends Error {
   readonly code = "runtime_not_found" as const;
   readonly runtimeId: string;
+  /** Path-free, machine-readable cause when the resolver knows it (e.g. Windows launch resolution). */
+  readonly reason?: string;
 
-  constructor(input: { runtimeId: string; message: string }) {
+  constructor(input: { runtimeId: string; message: string; reason?: string }) {
     super(input.message);
     this.name = "RuntimeExecutableNotFoundError";
     this.runtimeId = input.runtimeId;
+    if (input.reason) this.reason = input.reason;
   }
 }
 

@@ -44,7 +44,7 @@ export default function CheckMarker({
   ...props
 }: CheckMarkerProps) {
   const checkedClasses = tone === "yellow-fill"
-    ? "bg-primary text-primary-950 theme-brutal:bg-soft-signal theme-brutal:text-black"
+    ? "bg-primary-soft text-primary-strong theme-brutal:bg-soft-signal theme-brutal:text-black"
     : "bg-foreground-strong text-foreground-inverse theme-brutal:bg-black theme-brutal:text-white";
   const uncheckedClasses = previewOnHover
     ? "bg-layer-panel text-transparent group-hover:text-foreground-muted theme-brutal:bg-white theme-brutal:group-hover:text-black/20"

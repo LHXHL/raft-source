@@ -1,4 +1,5 @@
 import { Router, type Request, type RequestHandler, type Router as RouterType } from "express";
+import { kickAppNotificationDelivery } from "../services/appNotificationDeliveryService";
 import multer from "multer";
 import { randomUUID } from "node:crypto";
 import type { Server as SocketServer } from "socket.io";
@@ -59,7 +60,7 @@ import { agents as agentsTable, channelAgents, channelHumans, channels, computer
 import { requireServerMatchesParam } from "../middleware/auth";
 import { addTraceEvent, createTraceDbQueryTracer, errorClassOf, tracePhase } from "../tracing/semanticTrace";
 import { traceRouteFailure } from "../tracing/routeFailure";
-import { sendJsonServerError } from "./errorResponse";
+import { respondToRisingWaveOverload, sendJsonServerError } from "./errorResponse";
 import type { DbQueryTracer } from "../tracing/dbQueryTrace";
 import {
   createAvatarUpload,
@@ -838,7 +839,8 @@ serverRouter.get("/unread-summary", async (req, res) => {
       total_unread_count: summary.reduce((sum, item) => sum + item.unreadCount, 0),
     });
     res.json(summary);
-  } catch {
+  } catch (err) {
+    if (respondToRisingWaveOverload(err, res)) return;
     res.status(500).json({ error: "Failed to get unread summary" });
   }
 });
@@ -887,6 +889,8 @@ serverRouter.post("/join-community", async (req, res) => {
       slug: rawSlug,
       ...getAgreementRequestMetadata(req),
     });
+    // Committed: deliver the server.member_added App Notification now.
+    kickAppNotificationDelivery();
     const io = req.app.get("io") as SocketServer | undefined;
     const agentOrchestrator = req.app.get("agentOrchestrator") as AgentOrchestrator | undefined;
     if (io) {

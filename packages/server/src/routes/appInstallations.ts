@@ -23,6 +23,7 @@ import {
 import type { AgentOrchestrator } from "../services/agentOrchestrator";
 import { agentIdHashAttrs } from "../tracing/traceIdentity";
 import { withTraceChildSpan } from "../tracing/semanticTrace";
+import { encodePixelAvatarKey } from "../services/pixelAvatarService";
 import { sendJsonServerError } from "./errorResponse";
 
 export const appInstallationRouter: RouterType = Router();
@@ -93,7 +94,17 @@ appInstallationRouter.get("/agents", async (req, res) => {
   try {
     const result = await readInstallationProjection(req, res, listAppAgentProjections);
     if (!result) return;
-    res.json({ installation_id: result.credential.installationId, agents: result.projection });
+    const origin = process.env.SERVER_URL?.trim() || `${req.protocol}://${req.get("host")}`;
+    res.json({ installation_id: result.credential.installationId, agents: result.projection.map((agent) => {
+      const pixelKey = agent.avatar_url ? encodePixelAvatarKey(agent.avatar_url) : null;
+      const avatarPath = pixelKey ? `/api/avatars/pixel/${pixelKey}.svg` : agent.avatar_url;
+      let avatarUrl: string | null = null;
+      if (avatarPath && (/^https?:\/\//i.test(avatarPath) || avatarPath.startsWith("/"))) {
+        try { avatarUrl = new URL(avatarPath, origin).toString(); }
+        catch { /* An invalid stored avatar must not break the directory read. */ }
+      }
+      return { ...agent, avatar_url: avatarUrl };
+    }) });
   } catch (error) {
     handleProjectionError(req, error, res, "List installation agent projections");
   }

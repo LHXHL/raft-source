@@ -252,16 +252,16 @@ export default function AddMachineDialog({ onClose }: { onClose: () => void }) {
                 onClick={() => setMachineType("local")}
                 className={`flex-1 flex items-center gap-2 border p-3 text-left transition-colors rounded-md theme-brutal:rounded-none theme-brutal:border-2 ${
                   machineType === "local"
-                    ? "border-line-muted theme-brutal:border-black bg-primary-400 text-primary-950 font-bold shadow-[0_0_0_1px_var(--primary-edge)] theme-brutal:bg-soft-signal theme-brutal:text-black theme-brutal:shadow-brutal-sm"
+                    ? "border-line-muted theme-brutal:border-black bg-primary-soft text-primary-strong font-bold shadow-[0_0_0_1px_var(--primary-edge)] theme-brutal:bg-soft-signal theme-brutal:text-black theme-brutal:shadow-brutal-sm"
                     : "border-line-muted theme-brutal:border-black/30 bg-layer-panel theme-brutal:bg-white hover:border-line-strong theme-brutal:hover:border-black"
                 }`}
               >
-                <Monitor size={18} className={`shrink-0 ${machineType === "local" ? "text-primary-950 theme-brutal:text-black" : "text-foreground-strong theme-brutal:text-black"}`} />
+                <Monitor size={18} className={`shrink-0 ${machineType === "local" ? "text-primary-strong theme-brutal:text-black" : "text-foreground-strong theme-brutal:text-black"}`} />
                 <div>
                   <div className="text-sm font-bold uppercase">
                     {formatMessage({ id: "machine.add.yourComputer" })}
                   </div>
-                  <div className={`text-xs font-normal normal-case ${machineType === "local" ? "text-primary-950/70 theme-brutal:text-black/50" : "text-foreground-muted theme-brutal:text-black/50"}`}>
+                  <div className={`text-xs font-normal normal-case ${machineType === "local" ? "text-primary-strong/70 theme-brutal:text-black/50" : "text-foreground-muted theme-brutal:text-black/50"}`}>
                     {formatMessage({ id: "machine.add.yourComputerDescription" })}
                   </div>
                 </div>

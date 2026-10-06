@@ -134,13 +134,13 @@ export class ClaudeDriver implements RuntimeDriver {
     );
 
     const claudeCommand = resolveClaudeLaunchCommand(ctx.config);
-    const spawnSpec = buildClaudeSpawnSpec(claudeCommand);
+    const spawnSpec = buildClaudeSpawnSpec(claudeCommand, args, { env: spawnEnv as NodeJS.ProcessEnv });
 
-    const proc = spawn(spawnSpec.command, args, {
+    const proc = spawn(spawnSpec.command, spawnSpec.args, {
       cwd: ctx.workingDirectory,
       stdio: ["pipe", "pipe", "pipe"],
-      env: spawnEnv as NodeJS.ProcessEnv,
-      shell: spawnSpec.shell,
+      env: spawnSpec.env ?? spawnEnv as NodeJS.ProcessEnv,
+      shell: false,
     });
 
     // Send initial prompt via stdin (stream-json format)

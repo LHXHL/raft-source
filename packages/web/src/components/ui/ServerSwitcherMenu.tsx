@@ -139,7 +139,7 @@ function SortableServerRow({
       ref={setNodeRef}
       style={style}
       onAuxClick={(event) => onAuxSelect(event, server, targetHref)}
-      className="group/server-row relative flex h-12 w-full items-stretch text-sm font-medium text-foreground-strong theme-brutal:text-black transition-colors hover:bg-primary-400 hover:text-primary-950 focus-within:bg-primary-400 focus-within:text-primary-950"
+      className="group/server-row relative flex h-12 w-full items-stretch text-sm font-medium text-foreground-strong theme-brutal:text-black transition-colors hover:bg-primary-soft hover:text-primary-strong focus-within:bg-primary-soft focus-within:text-primary-strong theme-brutal:hover:bg-primary-400 theme-brutal:hover:text-primary-950 theme-brutal:focus-within:bg-primary-400 theme-brutal:focus-within:text-primary-950"
     >
       <a
         href={targetHref}
@@ -159,7 +159,7 @@ function SortableServerRow({
         <AvatarSlot context="surface-list" type="server" serverAvatarUrl={server.avatarUrl} serverInitial={initial} />
         <div className="min-w-0 flex-1 text-left">
           <div className="truncate">{server.name}</div>
-          <div className="truncate font-mono text-xs text-foreground-muted theme-brutal:text-black/40 group-hover/server-row:text-primary-950 group-focus-within/server-row:text-primary-950">/{server.slug}</div>
+          <div className="truncate font-mono text-xs text-foreground-muted theme-brutal:text-black/40 group-hover/server-row:text-primary-strong group-focus-within/server-row:text-primary-strong theme-brutal:group-hover/server-row:text-primary-950 theme-brutal:group-focus-within/server-row:text-primary-950">/{server.slug}</div>
         </div>
         {!isCurrent && unread !== undefined && unread > 0 && (
           isMuted ? (
@@ -182,7 +182,7 @@ function SortableServerRow({
         aria-label={intl.formatMessage({ id: "ui.serverSwitcher.reorderServer" }, { name: server.name })}
         {...attributes}
         {...listeners}
-        className="flex w-6 shrink-0 touch-none cursor-grab items-center justify-center text-foreground-muted theme-brutal:text-black/45 group-hover/server-row:text-primary-950 group-focus-within/server-row:text-primary-950 active:cursor-grabbing"
+        className="flex w-6 shrink-0 touch-none cursor-grab items-center justify-center text-foreground-muted theme-brutal:text-black/45 group-hover/server-row:text-primary-strong group-focus-within/server-row:text-primary-strong theme-brutal:group-hover/server-row:text-primary-950 theme-brutal:group-focus-within/server-row:text-primary-950 active:cursor-grabbing"
       >
         <GripVertical size={14} />
       </button>
@@ -407,7 +407,7 @@ export default function ServerSwitcherMenu({
         <button
           key={option.slug}
           onClick={() => void handleJoinCommunity(option.slug)}
-          className="flex w-full items-center justify-start gap-2 px-3 py-2 [@media(max-height:600px)]:py-1 text-left text-sm font-bold text-foreground-strong theme-brutal:text-black hover:bg-primary-400 hover:text-primary-950 focus-visible:bg-primary-400 focus-visible:text-primary-950 transition-colors"
+          className="flex w-full items-center justify-start gap-2 px-3 py-2 [@media(max-height:600px)]:py-1 text-left text-sm font-bold text-foreground-strong theme-brutal:text-black hover:bg-primary-soft hover:text-primary-strong focus-visible:bg-primary-soft focus-visible:text-primary-strong transition-colors theme-brutal:hover:bg-primary-400 theme-brutal:hover:text-primary-950 theme-brutal:focus-visible:bg-primary-400 theme-brutal:focus-visible:text-primary-950"
         >
           <Plus size={14} />
           <span className="min-w-0 flex-1 text-left">{option.label}</span>
@@ -422,7 +422,7 @@ export default function ServerSwitcherMenu({
           serverPersistence.clearLastServerSlug();
           navigate("/");
         }}
-        className="flex w-full items-center justify-start gap-2 px-3 py-2 [@media(max-height:600px)]:py-1 text-left text-sm font-bold text-foreground-strong theme-brutal:text-black hover:bg-primary-400 hover:text-primary-950 focus-visible:bg-primary-400 focus-visible:text-primary-950 transition-colors"
+        className="flex w-full items-center justify-start gap-2 px-3 py-2 [@media(max-height:600px)]:py-1 text-left text-sm font-bold text-foreground-strong theme-brutal:text-black hover:bg-primary-soft hover:text-primary-strong focus-visible:bg-primary-soft focus-visible:text-primary-strong transition-colors theme-brutal:hover:bg-primary-400 theme-brutal:hover:text-primary-950 theme-brutal:focus-visible:bg-primary-400 theme-brutal:focus-visible:text-primary-950"
       >
         <Plus size={14} />
         <span className="min-w-0 flex-1 text-left">{intl.formatMessage({ id: "ui.serverSwitcher.switchOrCreate" })}</span>
@@ -439,7 +439,7 @@ export default function ServerSwitcherMenu({
             onClose();
             setShowInviteHuman(true);
           }}
-          className="flex w-full items-center justify-start gap-2 px-3 py-2 [@media(max-height:600px)]:py-1 text-left text-sm font-bold text-foreground-strong theme-brutal:text-black hover:bg-primary-400 hover:text-primary-950 focus-visible:bg-primary-400 focus-visible:text-primary-950 theme-brutal:hover:bg-brutal-pink transition-colors"
+          className="flex w-full items-center justify-start gap-2 px-3 py-2 [@media(max-height:600px)]:py-1 text-left text-sm font-bold text-foreground-strong theme-brutal:text-black hover:bg-primary-soft hover:text-primary-strong focus-visible:bg-primary-soft focus-visible:text-primary-strong theme-brutal:hover:bg-brutal-pink transition-colors"
         >
           <UserPlus size={14} />
           <span className="min-w-0 flex-1 text-left">{intl.formatMessage({ id: "layout.sidebar.inviteHuman" })}</span>

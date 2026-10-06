@@ -36,20 +36,37 @@ const propertyValue = z.union([z.string().max(256), z.number(), z.boolean()]);
 
 export const clientEventBatchSchema = z.object({
   source: z.enum(["web", "desktop"]),
-  app_version: z.string().max(64).optional(),
+  app_version: z.string().max(64).regex(/^[0-9A-Za-z._+-]+$/).optional(),
   platform: shortToken.optional(),
   events: z.array(z.object({
     uuid: z.uuid(),
     event: z.string().max(64),
     timestamp: z.iso.datetime({ offset: true }),
-    client_session_id: z.string().max(64).optional(),
+    client_session_id: z.uuid().optional(),
     properties: z.record(z.string().max(64), propertyValue).optional(),
   }).strict()).min(1).max(MAX_CLIENT_EVENTS_PER_BATCH),
 }).strict();
 
 export type ClientEventBatch = z.infer<typeof clientEventBatchSchema>;
 
-type IngestRejection = ProductEventRejection | "timestamp_out_of_range";
+type IngestRejection = ProductEventRejection | "timestamp_out_of_range" | "duplicate";
+
+// replica-local: best-effort dedup only. A client never retries a batch, so
+// duplicates are rare; readers still dedupe by uuid across replicas.
+const RECENT_UUID_LIMIT = 50_000;
+const recentUuids = new Set<string>();
+
+/** True the first time this replica sees `uuid` (within the recent window). */
+export function rememberEventUuid(uuid: string): boolean {
+  if (recentUuids.has(uuid)) return false;
+  recentUuids.add(uuid);
+  if (recentUuids.size > RECENT_UUID_LIMIT) {
+    // Sets iterate in insertion order: drop the oldest.
+    const oldest = recentUuids.values().next().value;
+    if (oldest !== undefined) recentUuids.delete(oldest);
+  }
+  return true;
+}
 
 export interface ClientEventRowsResult {
   rows: ProductEventRow[];
@@ -69,6 +86,10 @@ export function buildClientEventRows(input: {
   };
   const now = input.receivedAt.getTime();
   for (const event of input.batch.events) {
+    if (!rememberEventUuid(event.uuid)) {
+      reject("duplicate");
+      continue;
+    }
     const properties = event.properties ?? {};
     const validation = validateProductEvent(event.event, properties, input.batch.source);
     if (!validation.ok) {

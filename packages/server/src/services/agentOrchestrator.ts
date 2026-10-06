@@ -83,6 +83,7 @@ import {
   type SpawnFailureActivityDiagnostic,
   NON_RETRYABLE_SPAWN_FAILURE_REASONS,
   AGENT_MIGRATION_CAPABILITY,
+  MODEL_SEEN_MAX_ITEMS_PER_REPORT,
 } from "@botiverse/raft-shared";
 import {
   FeedbackTranscriptLateResults,
@@ -982,6 +983,13 @@ type WeakOfflineCompetingFact = "redis_busy_activity" | "persisted_busy_activity
 
 type ActivityTraceOptions = {
   parent?: TraceContext | null;
+  /**
+   * The agent's row as the caller loaded it in this request (e.g. the agent
+   * list). Stands in for the cache-miss and authoritative re-reads, which would
+   * return the same row moments later: a live row seeds the cache, a deleted
+   * row resolves as "no agent" (getAgent excludes deleted rows) without a query.
+   */
+  persistedAgent?: PersistedAgentRow;
 };
 
 type RuntimeContextMachine = {
@@ -4045,10 +4053,13 @@ export class AgentOrchestrator extends EventEmitter {
     // Redis is an authority only for a value the durable row accepted. Publish
     // nothing (including the process-local shadow) when persistence is a no-op
     // or throws, otherwise another replica could observe Redis-only truth.
-    const persisted = await this.persistAgentLastRuntimeError(agentId, error);
-    if (!persisted) return false;
+    // `durable` is what the row holds now: `error`, or the same error already
+    // stored a moment ago (crash loop; see setAgentLastRuntimeError). Cache and
+    // Redis carry that, so they never differ from the row.
+    const durable = await this.persistAgentLastRuntimeError(agentId, error);
+    if (!durable) return false;
 
-    this.updateCache(agentId, { lastRuntimeError: error });
+    this.updateCache(agentId, { lastRuntimeError: durable });
     // gamma-2 shadow: the error state is daemon-reported ground truth
     // (observed); classification note filed for Kai's calibration table.
     this.emitActivityWriterShadowVerdict(agentId, {
@@ -4066,8 +4077,8 @@ export class AgentOrchestrator extends EventEmitter {
         signalSite: "runtime_error",
       },
     });
-    await this.mirrorAgentRuntimeError(agentId, error);
-    return persisted;
+    await this.mirrorAgentRuntimeError(agentId, durable);
+    return true;
   }
 
   private async clearLastRuntimeError(agentId: string): Promise<boolean> {
@@ -4298,6 +4309,7 @@ export class AgentOrchestrator extends EventEmitter {
   private async resolveLastRuntimeErrorActivity(
     agentId: string,
     agent: CachedAgentState | null,
+    loadAuthoritativeAgent: () => Promise<CachedAgentState | null> = () => this.getAuthoritativeAgentForDelivery(agentId),
   ): Promise<{
     agent: CachedAgentState | null;
     activity: VisibleActivity | null;
@@ -4329,7 +4341,7 @@ export class AgentOrchestrator extends EventEmitter {
         // A missing mirror is a rollout/expiry cache miss, not authority for a
         // process-local value. Re-source from DB once and seed an explicit error
         // or clear record so subsequent replica reads converge without a DB hit.
-        const freshAgent = await this.getAuthoritativeAgentForDelivery(agentId);
+        const freshAgent = await loadAuthoritativeAgent();
         if (freshAgent) {
           await this.mirrorAgentRuntimeError(agentId, freshAgent.lastRuntimeError);
         }
@@ -4350,7 +4362,7 @@ export class AgentOrchestrator extends EventEmitter {
       }
     }
 
-    const freshAgent = await this.getAuthoritativeAgentForDelivery(agentId);
+    const freshAgent = await loadAuthoritativeAgent();
     return {
       agent: freshAgent,
       activity: freshAgent?.lastRuntimeError
@@ -4664,8 +4676,11 @@ export class AgentOrchestrator extends EventEmitter {
   ): Promise<VisibleActivity | null> {
     const reachabilityInput = await this.loadMachineReachabilityPlanInput({ agent });
     const reachability = planMachineReachability(reachabilityInput);
-    const persisted = await this.loadLatestPersistedActivityHint(agentId);
     const isExternal = reachability === "external-reported";
+    // These rule the persisted hint out below whatever it holds; skip its query
+    // (every listed deleted / inactive agent paid it on every agent-list read).
+    if (!agent || (!isExternal && agent.status !== "active")) return null;
+    const persisted = await this.loadLatestPersistedActivityHint(agentId);
     const weakOfflineSource = this.getSuppressibleWeakOfflineSource(agent, reachabilityInput, reachability);
     const weakOfflineCompetingFact = weakOfflineSource && persisted
       ? this.getWeakOfflineCompetingFact(persisted, "persisted")
@@ -4698,9 +4713,18 @@ export class AgentOrchestrator extends EventEmitter {
   // Agent state cache management
 
   /** Get cached agent state, falling back to DB on cache miss */
-  private async getCachedAgent(agentId: string): Promise<CachedAgentState | null> {
+  private async getCachedAgent(agentId: string, knownRow?: PersistedAgentRow): Promise<CachedAgentState | null> {
     const cached = this.agentStateCache.get(agentId);
     if (cached) return cached;
+
+    // The caller's row from this request answers the miss without a query:
+    // a deleted row is what getAgent(id, false) would return as null.
+    if (knownRow) {
+      if (knownRow.deletedAt) return null;
+      const seeded = this.cachedStateFromPersistedAgent(knownRow);
+      this.agentStateCache.set(agentId, seeded);
+      return seeded;
+    }
 
     // Cache miss — load from DB and populate cache
     const agent = await agentService.getAgent(agentId, false, {
@@ -4754,6 +4778,22 @@ export class AgentOrchestrator extends EventEmitter {
 
   // `protected` for the same reason: arms ②③ must get past identity resolution to reach the
   // branch under test, and stubbing it is the only way to do that without seeding a full agent row.
+  /**
+   * getAuthoritativeAgentForDelivery for activity reads. A deleted row loaded by
+   * the caller in this request answers it without a query, with the same effect
+   * (getAgent excludes deleted rows: the cache entry is dropped, null returned).
+   */
+  private async getAuthoritativeAgentForActivity(
+    agentId: string,
+    knownRow: PersistedAgentRow | undefined,
+  ): Promise<CachedAgentState | null> {
+    if (knownRow?.deletedAt) {
+      this.agentStateCache.delete(agentId);
+      return null;
+    }
+    return this.getAuthoritativeAgentForDelivery(agentId);
+  }
+
   protected async getAuthoritativeAgentForDelivery(agentId: string): Promise<CachedAgentState | null> {
     const persisted = await this.loadAgentForDelivery(agentId);
     if (!persisted) {
@@ -8773,7 +8813,10 @@ export class AgentOrchestrator extends EventEmitter {
             }
             let advanced = 0;
             let unchanged = 0;
-            for (const item of msg.items) {
+            // Each item costs reads and maybe a write; a daemon never sends more
+            // than the cap in one report, so the rest is ignored (positions stay).
+            const items = msg.items.slice(0, MODEL_SEEN_MAX_ITEMS_PER_REPORT);
+            for (const item of items) {
               const result = await this.applyAgentModelSeen({
                 agentId: msg.agentId,
                 serverId: agent.serverId ?? null,
@@ -8783,7 +8826,12 @@ export class AgentOrchestrator extends EventEmitter {
               if (result.outcome === "advanced") advanced += 1;
               else unchanged += 1;
             }
-            return { outcome: "applied", advanced_count: advanced, unchanged_count: unchanged };
+            return {
+              outcome: "applied",
+              advanced_count: advanced,
+              unchanged_count: unchanged,
+              ignored_items_count: msg.items.length - items.length,
+            };
           },
           (attrs) => ({ attrs }),
         );
@@ -14297,7 +14345,9 @@ export class AgentOrchestrator extends EventEmitter {
       attrs: { agent_id: agentId, agent_id_present: Boolean(agentId) },
     });
     try {
-      let agent = await this.getCachedAgent(agentId);
+      const knownRow = options.persistedAgent?.id === agentId ? options.persistedAgent : undefined;
+      const authoritativeAgent = () => this.getAuthoritativeAgentForActivity(agentId, knownRow);
+      let agent = await this.getCachedAgent(agentId, knownRow);
       let localMachineId = agent?.machineId ?? null;
       let hostedLocally = localMachineId !== null && this.hasMachineLocally(localMachineId);
       let redisActivity: ActivitySnapshot | null | undefined;
@@ -14305,7 +14355,7 @@ export class AgentOrchestrator extends EventEmitter {
         if (!hostedLocally && this.replicaStateStore.isAvailable()) {
           redisActivity = activitySnapshotFromPersisted(await this.replicaStateStore.getAgentActivity(agentId));
           if (redisActivity && redisActivity.activity !== "offline") {
-            const freshAgent = await this.getAuthoritativeAgentForDelivery(agentId);
+            const freshAgent = await authoritativeAgent();
             if (freshAgent) agent = freshAgent;
           }
         }
@@ -14316,7 +14366,7 @@ export class AgentOrchestrator extends EventEmitter {
         return stopped;
       }
 
-      const runtimeErrorResolution = await this.resolveLastRuntimeErrorActivity(agentId, agent);
+      const runtimeErrorResolution = await this.resolveLastRuntimeErrorActivity(agentId, agent, authoritativeAgent);
       agent = runtimeErrorResolution.agent;
       localMachineId = agent?.machineId ?? null;
       hostedLocally = localMachineId !== null && this.hasMachineLocally(localMachineId);
@@ -14379,7 +14429,7 @@ export class AgentOrchestrator extends EventEmitter {
         redisActivity ??= activitySnapshotFromPersisted(await this.replicaStateStore.getAgentActivity(agentId));
         if (redisActivity) {
           if (redisActivity.activity === "offline" && agent && !hostedLocally) {
-            const freshAgent = await this.getAuthoritativeAgentForDelivery(agentId);
+            const freshAgent = await authoritativeAgent();
             if (freshAgent) agent = freshAgent;
             const redisOfflineDetail = redisActivity.detail.trim();
             const hasSpecificRedisOfflineDetail = redisOfflineDetail !== "" && redisOfflineDetail.toLowerCase() !== "stopped";

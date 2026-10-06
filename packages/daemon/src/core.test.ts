@@ -1,4 +1,4 @@
-import { AgentProxyBindError } from "./spawnFailureErrors";
+import { AgentProxyBindError, RuntimeExecutableNotFoundError } from "./spawnFailureErrors";
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, readFileSync, rmSync } from "node:fs";
@@ -6219,6 +6219,68 @@ test("DaemonCore keeps an idle auto-restart outside the delivery span", async ()
     serverSpan.end();
     // Stop before dropping the mock: stop revokes the minted credential over
     // the same fetch, and nothing may leave the process.
+    await core.stop();
+    restoreFetch();
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("DaemonCore records a path-free launch_unresolved event when a runtime launch cannot be resolved", async () => {
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), "slock-daemon-core-test-"));
+  const driver = new FakeDriver();
+  driver.failSpawn = new RuntimeExecutableNotFoundError({
+    runtimeId: "cursor",
+    reason: "batch_target_unresolved",
+    message: "Cannot start cursor on Windows: cursor-agent.cmd is a batch wrapper (.cmd/.bat) whose target program could not be found",
+  });
+  const sockets: FakeWebSocket[] = [];
+  const { sink, tracer } = makeDeterministicTracer();
+  const restoreFetch = installDaemonFetchMockForTests((async () =>
+    new Response(JSON.stringify({ apiKey: "sk_agent_minted", credentialId: "cred-1" }), {
+      status: 201,
+      headers: { "content-type": "application/json" },
+    })) as typeof fetch);
+
+  const core = new DaemonCore({
+    serverUrl: "https://daemon.example.com",
+    apiKey: "sk_machine_test",
+    dataDir,
+    tracer,
+    connectionOptions: {
+      wsFactory: (_url: string, _options?: Parameters<NonNullable<ConnectionOptions["wsFactory"]>>[1]) => {
+        const socket = new FakeWebSocket();
+        sockets.push(socket);
+        return socket;
+      },
+    },
+    agentManagerFactory: (sendToServer, daemonApiKey, options) =>
+      new AgentProcessManager(sendToServer, daemonApiKey, {
+        dataDir: options?.dataDir,
+        serverUrl: options?.serverUrl ?? "https://daemon.example.com",
+        driverResolver: () => driver,
+        defaultAgentEnvVarsProvider: options?.defaultAgentEnvVarsProvider,
+        tracer: options?.tracer,
+      }),
+  });
+
+  try {
+    core.start();
+    const socket = sockets[0];
+    assert.ok(socket, "wsFactory should create a websocket");
+    socket.emitOpen();
+    socket.emitServerMessage({ type: "agent:start", agentId: "agent-1", launchId: "launch-1", config: makeConfig({ runtime: "cursor" }) });
+    await waitFor(
+      () => traceRows(sink).some((row) => row.name === "daemon.agent.launch_unresolved"),
+      "launch_unresolved event",
+    );
+    const event = traceRows(sink).find((row) => row.name === "daemon.agent.launch_unresolved");
+    assert.equal(event?.attrs?.runtime, "cursor");
+    assert.equal(event?.attrs?.reason, "batch_target_unresolved");
+    assert.equal(event?.attrs?.launchId, "launch-1");
+    assert.equal(event?.attrs?.platform, process.platform);
+    assert.equal(event?.status, "error");
+    assert.ok(!JSON.stringify(event?.attrs).includes("cursor-agent.cmd"), "the event carries the reason, not the message");
+  } finally {
     await core.stop();
     restoreFetch();
     await rm(dataDir, { recursive: true, force: true });

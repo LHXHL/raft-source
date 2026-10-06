@@ -39,6 +39,11 @@ type StringNavigateLike = (
   options: { replace: boolean },
 ) => void;
 
+type RecordMobileBackNavigationLike = (
+  navigationType: "PUSH" | "REPLACE",
+  path: string,
+) => void;
+
 export function getRightPanelLocationSnapshot(
   fallback: RightPanelLocationSnapshot,
 ): RightPanelLocationSnapshot {
@@ -146,21 +151,60 @@ export function transitionThreadToParentMessage({
   pathname,
   parentMessageId,
   navigate,
+  replace = true,
+  recordMobileBack = true,
+  recordMobileBackNavigation = recordSynchronousMobileBackNavigation,
 }: {
   pathname: string;
   parentMessageId: string;
   navigate: StringNavigateLike;
+  replace?: boolean;
+  recordMobileBack?: boolean;
+  recordMobileBackNavigation?: RecordMobileBackNavigationLike;
 }): void {
   const nextSearch = `?msg=${parentMessageId}`;
   beginRightPanelSearchTransition(nextSearch, pathname);
-  navigate(`${pathname}${nextSearch}`, { replace: true });
+  navigate(`${pathname}${nextSearch}`, { replace });
   beginRightPanelSearchTransition(nextSearch, pathname);
-  recordSynchronousMobileBackNavigation("REPLACE", `${pathname}${nextSearch}`);
+  if (recordMobileBack) {
+    recordMobileBackNavigation(
+      replace ? "REPLACE" : "PUSH",
+      `${pathname}${nextSearch}`,
+    );
+  }
   // BrowserRouter writes history synchronously even though its React render
   // commits in a transition. Complete the route-owned store teardown in the
   // same event so a busy destination render cannot leave the old thread
   // mounted while the canonical parent URL is already visible.
   useThreadStore.getState().closeThread();
+}
+
+export function openThreadParentMessageRoute({
+  isDesktop,
+  navigate,
+  parentChannelId,
+  parentMessageId,
+  parentRouteKind,
+  serverSlug,
+  recordMobileBackNavigation,
+}: {
+  isDesktop: boolean;
+  navigate: StringNavigateLike;
+  parentChannelId: string;
+  parentMessageId: string;
+  parentRouteKind: "channel" | "dm";
+  serverSlug?: string;
+  recordMobileBackNavigation?: RecordMobileBackNavigationLike;
+}): void {
+  const base = serverSlug ? `/s/${serverSlug}` : "";
+  transitionThreadToParentMessage({
+    pathname: `${base}/${parentRouteKind}/${parentChannelId}`,
+    parentMessageId,
+    navigate,
+    replace: !isDesktop,
+    recordMobileBack: !isDesktop,
+    recordMobileBackNavigation,
+  });
 }
 
 export function hasRightPanelThreadAnchorChanged(

@@ -1019,7 +1019,7 @@ export default function TasksPanel({ channelId, onOpenTask, onDragTask }: TasksP
           would be redundant — drop straight into the toolbar. */}
       {!isChannelMode && (
         <div data-slot="panel-header" className="flex h-panel-header items-center gap-3 border-b border-line-muted bg-layer-panel px-5 theme-brutal:border-b-2 theme-brutal:border-black theme-brutal:bg-soft-signal theme-brutal:md:bg-white">
-          <div className="hidden md:flex size-icon-header items-center justify-center border border-line-muted bg-primary text-primary-950 theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-soft-signal theme-brutal:text-black">
+          <div className="hidden md:flex size-icon-header items-center justify-center border border-line-muted bg-primary-soft text-primary-strong theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-soft-signal theme-brutal:text-black">
             <CheckSquare size={18} />
           </div>
           <div className="min-w-0 flex-1">

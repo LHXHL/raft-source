@@ -672,7 +672,7 @@ test("Connected Apps loads registered surfaces without depending on the retired 
   const editorRail = within(editor).getByTestId("connected-app-editor-rail");
   // The rail's App Notifications status resolves ASYNCHRONOUSLY, after the editor
   // itself mounts. Reading it synchronously here raced that load and produced the
-  // intermittent "App NotificationsLoading" vs "App NotificationsOff" failure —
+  // intermittent "App NotificationsLoading" vs "WebhookOff" failure —
   // rare when this file runs alone, much likelier in the full suite, where the
   // node test runner runs files in parallel and the extra CPU pressure widens the
   // window. `waitFor` retries until it settles; it is not a sleep, and it fails
@@ -683,7 +683,8 @@ test("Connected Apps loads registered surfaces without depending on the retired 
       [
         "ProfileComplete",
         "Login with RaftOAuth ready",
-        "App NotificationsOff",
+        "App permissions0 permissions selected",
+        "WebhookOff",
         "DistributionPrivate",
         "Danger zoneRestricted",
       ],
@@ -695,6 +696,10 @@ test("Connected Apps loads registered surfaces without depending on the retired 
   assert.ok(within(editor).getByTestId("connected-app-editor-section-distribution"));
   assert.ok(within(editor).getByTestId("connected-app-editor-section-danger"));
   const editorContent = within(editor).getByTestId("connected-app-editor-content");
+  assert.deepEqual(
+    Array.from(editorContent.querySelectorAll('[data-testid^="connected-app-editor-section-"]')).map((section) => section.getAttribute("data-testid")?.replace("connected-app-editor-section-", "")),
+    ["profile", "login", "permissions", "notifications", "distribution", "danger"],
+  );
   editorContent.getBoundingClientRect = () => ({ top: 100 } as DOMRect);
   within(editor).getByTestId("connected-app-editor-section-profile").getBoundingClientRect = () => ({ top: -500 } as DOMRect);
   within(editor).getByTestId("connected-app-editor-section-login").getBoundingClientRect = () => ({ top: -100 } as DOMRect);
@@ -706,7 +711,7 @@ test("Connected Apps loads registered surfaces without depending on the retired 
     clientHeight: { configurable: true, value: 600 },
     scrollTop: { configurable: true, value: 700, writable: true },
   });
-  const notificationsRailButton = within(editorRail).getByRole("button", { name: /^App Notifications/ });
+  const notificationsRailButton = within(editorRail).getByRole("button", { name: /^Webhook/ });
   Object.defineProperties(editorRail, {
     scrollWidth: { configurable: true, value: 900 },
     clientWidth: { configurable: true, value: 300 },
@@ -847,17 +852,17 @@ test("Connected Apps detail modal renders cataloged zh-cn headings and App Notif
   assert.ok(approvedModal, "approved marketplace app detail should open in a modal card");
   assert.ok(within(approvedModal).getByText("资料"));
   assert.ok(within(approvedModal).getByText("使用 Raft 登录"));
-  assert.ok(within(approvedModal).getAllByText("App Notifications").length >= 1);
+  assert.ok(within(approvedModal).getAllByText("应用权限").length >= 1);
   assert.ok(within(approvedModal).getByText("分发"));
   assert.ok(within(approvedModal).getByText("危险区"));
   assert.ok(within(approvedModal).getByText("此应用在人类或 Agent 连接时可请求的 scope。"));
   assert.ok(within(approvedModal).getByText("已声明访问"));
-  assert.ok(within(approvedModal).getByText("安装后可用的已批准 App Notifications 权限；投递仍需单独启用。"));
+  assert.ok(within(approvedModal).getByText("此安装请求的应用权限。读取数据不需要登录或启用 webhook。"));
   assert.equal(within(approvedModal).queryByText("Permissions this app receives when installed."), null);
   fireEvent.click(within(approvedModal).getByRole("button", { name: "关闭应用详情" }));
 
   fireEvent.click(await screen.findByText("Pending Notes"));
-  const pendingModal = (await screen.findByText("请求的 App Notifications 权限仍在审核中；批准前无法启用投递。")).closest('[data-slot="card"]') as HTMLElement;
+  const pendingModal = (await screen.findByText("新增的应用权限正在等待审核，原有已批准的访问保持可用。")).closest('[data-slot="card"]') as HTMLElement;
   assert.ok(pendingModal, "pending marketplace app detail should open in a modal card");
   assert.ok(within(pendingModal).getByText("App Review 待审核"));
 });
@@ -1192,7 +1197,7 @@ test("Connected Apps renders reviewed App Notifications state for developers and
 
   fireEvent.click(await screen.findByRole("button", { name: /Installed Alerts/ }));
   const installSummary = await screen.findByTestId("app-notifications-request-summary");
-  assert.ok(within(installSummary).getByText("Server"));
+  assert.ok(within(installSummary).getByText("Server · read"));
   assert.ok(within(installSummary).getByText("Plan status changed"));
   assert.equal(within(installSummary).queryByRole("checkbox"), null);
   fireEvent.click(screen.getByRole("button", { name: "Close app detail" }));
@@ -1202,9 +1207,10 @@ test("Connected Apps renders reviewed App Notifications state for developers and
   const editor = await screen.findByTestId("connected-app-editor");
   const editorRail = within(editor).getByTestId("connected-app-editor-rail");
   const notificationsSection = within(editor).getByTestId("connected-app-editor-section-notifications");
-  const notificationsRailButton = within(editorRail).getByRole("button", { name: /^App Notifications/ });
+  const notificationsRailButton = within(editorRail).getByRole("button", { name: /^Webhook/ });
   const developerPanel = await screen.findByTestId("developer-app-notifications");
-  const sourceInstallation = within(developerPanel).getByTestId("app-notifications-source-installation");
+  const appPermissionsPanel = within(editor).getByTestId("developer-app-permissions");
+  const sourceInstallation = within(appPermissionsPanel).getByTestId("app-notifications-source-installation");
   const installationInput = within(sourceInstallation).getByRole("textbox", { name: "Installation ID" }) as HTMLInputElement;
   assert.equal(installationInput.value, "source-installation-1");
   fireEvent.focus(installationInput);
@@ -1216,7 +1222,7 @@ test("Connected Apps renders reviewed App Notifications state for developers and
   assert.match(notificationsRailButton.textContent ?? "", /Off/);
   assert.ok(within(notificationsSection).getByText("Off", { exact: true }));
   assert.equal(within(developerPanel).queryByTestId("app-notifications-permissions"), null);
-  const enableSwitch = within(developerPanel).getByRole("switch", { name: "Enable App Notifications" });
+  const enableSwitch = within(developerPanel).getByRole("switch", { name: "Enable Webhook" });
   assert.equal(enableSwitch.getAttribute("aria-checked"), "false");
   assert.equal(within(developerPanel).queryByTestId("app-notifications-permission-picker"), null);
   assert.equal(within(developerPanel).queryByPlaceholderText("https://example.com/raft/events"), null);
@@ -1235,14 +1241,14 @@ test("Connected Apps renders reviewed App Notifications state for developers and
   assert.ok(await within(developerPanel).findByText("raft_webhook_secret_shown_once"));
   assert.ok(within(developerPanel).getByText("Signing secret · shown once"));
   await waitFor(() => {
-    const currentSwitch = within(developerPanel).getByRole("switch", { name: "Enable App Notifications" });
+    const currentSwitch = within(developerPanel).getByRole("switch", { name: "Enable Webhook" });
     assert.equal(currentSwitch.getAttribute("aria-checked"), "true");
     assert.equal(currentSwitch.hasAttribute("data-disabled"), false);
     assert.match(notificationsRailButton.textContent ?? "", /Enabled/);
     assert.ok(within(notificationsSection).getByText("Enabled", { exact: true }));
   });
   await act(async () => {
-    fireEvent.click(within(developerPanel).getByRole("switch", { name: "Enable App Notifications" }));
+    fireEvent.click(within(developerPanel).getByRole("switch", { name: "Enable Webhook" }));
     await new Promise((resolve) => window.setTimeout(resolve, 0));
   });
   assert.equal(within(developerPanel).queryByTestId("app-notifications-configuration"), null);
@@ -1270,11 +1276,11 @@ test("Connected Apps renders reviewed App Notifications state for developers and
   assert.equal(within(installedPanel).getAllByText("Plan status changed").length, 2);
   assert.equal(within(installedPanel).queryByRole("checkbox"), null);
   assert.equal(within(installedPanel).queryByText("Manage server approval"), null);
-  assert.ok(within(installedPanel).getByText("Approved data, developer subscriptions, and active events for this server."));
+  assert.ok(within(installedPanel).getByText("Permissions granted to this app on this Server are independent of user login and webhook delivery. Review and approve any additional access here."));
   const approvalBanner = within(installedPanel).getByTestId("app-notifications-approval-required");
   assert.ok(within(approvalBanner).getByText("This app requests new data access. Review the new data groups before approving the update."));
-  assert.ok(within(approvalBanner).getByText("New data group: Agent"));
-  assert.equal(within(approvalBanner).queryByText("New data group: Server"), null);
+  assert.ok(within(approvalBanner).getByText("New data group: Agent · read"));
+  assert.equal(within(approvalBanner).queryByText("New data group: Server · read"), null);
   fireEvent.click(within(installedPanel).getByRole("button", { name: "Approve update" }));
   await waitFor(() => assert.equal(within(installedPanel).queryByRole("button", { name: "Approve update" }), null));
   fireEvent.click(screen.getByRole("button", { name: "Close installed app details" }));
@@ -1374,10 +1380,8 @@ test("Connected Apps register form locks identity scopes and toggles agent messa
 
   fireEvent.click(await screen.findByRole("button", { name: "Register app" }));
   const editorRail = within(screen.getByTestId("connected-app-editor")).getByTestId("connected-app-editor-rail");
-  assert.ok(within(editorRail).getByRole("button", { name: /App Notifications.*Save app first/ }));
+  assert.ok(within(editorRail).getByRole("button", { name: /Webhook.*Save app first/ }));
   const picker = await screen.findByTestId("connected-app-declared-scopes");
-  assert.ok(within(picker).getByText("Declared scopes"));
-  assert.ok(within(picker).getByText("Choose what this app may request. Existing connections keep granted scopes until they reconnect or are revoked."));
   assert.ok(within(picker).getByText("Identity"));
   assert.ok(within(picker).getByText("openid"));
   assert.ok(within(picker).getByText("profile"));
@@ -1389,22 +1393,22 @@ test("Connected Apps register form locks identity scopes and toggles agent messa
   assert.ok(within(picker).getByText("Agent messaging"));
   assert.ok(within(picker).getByRole("checkbox", { name: "agent:event:write" }));
   assert.ok(within(picker).getByRole("checkbox", { name: "agent:notification:write" }));
-  assert.equal(within(picker).queryByText("Requires resource: this server's agent inbound."), null);
+  assert.equal(within(picker).queryByText("The user chooses the target agent when authorizing."), null);
 
   fireEvent.click(within(picker).getByRole("checkbox", { name: "agent:event:write" }));
-  assert.ok(await within(picker).findByText("Requires resource: this server's agent inbound."));
+  assert.ok(await within(picker).findByText("The user chooses the target agent when authorizing."));
 
   fireEvent.click(within(picker).getByRole("checkbox", { name: "agent:notification:write" }));
-  assert.ok(within(picker).getByText("Requires resource: this server's agent inbound."));
+  assert.ok(within(picker).getByText("The user chooses the target agent when authorizing."));
 
   fireEvent.click(within(picker).getByRole("checkbox", { name: "agent:event:write" }));
-  assert.ok(within(picker).getByText("Requires resource: this server's agent inbound."));
+  assert.ok(within(picker).getByText("The user chooses the target agent when authorizing."));
 
   fireEvent.click(within(picker).getByRole("checkbox", { name: "agent:notification:write" }));
-  assert.equal(within(picker).queryByText("Requires resource: this server's agent inbound."), null);
+  assert.equal(within(picker).queryByText("The user chooses the target agent when authorizing."), null);
 });
 
-test("Connected Apps retries permissions without recreating an app or losing its show-once secret", async () => {
+test("Connected Apps creates Agent read without webhook and retries permission failure without duplicating the app", async () => {
   resetStores();
   const createdClient = {
     id: "created-client",
@@ -1449,8 +1453,9 @@ test("Connected Apps retries permissions without recreating an app or losing its
     }
     throw new Error(`unexpected GET ${url}`);
   }) as typeof api.get;
-  api.post = (async (url: string) => {
+  api.post = (async (url: string, body?: unknown) => {
     assert.equal(url, "/integrations/clients");
+    assert.deepEqual((body as { allowedScopes: string[] }).allowedScopes, ["openid", "profile", "identity"]);
     createCount += 1;
     return { data: { client: createdClient, clientSecret: "raft_secret_create_once" } };
   }) as typeof api.post;
@@ -1461,7 +1466,7 @@ test("Connected Apps retries permissions without recreating an app or losing its
   }) as typeof api.patch;
   api.put = (async (url: string, body?: unknown) => {
     assert.equal(url, "/integrations/clients/created-client/app-notifications/permissions");
-    assert.deepEqual(body, { groups: ["server"], events: [] });
+    assert.deepEqual(body, { groups: ["agent"], events: [] });
     permissionCount += 1;
     if (permissionCount === 1) {
       throw { response: { data: { error: "permission write failed" } } };
@@ -1480,27 +1485,17 @@ test("Connected Apps retries permissions without recreating an app or losing its
   fireEvent.click(await screen.findByRole("button", { name: "Register app" }));
   fireEvent.change(screen.getByPlaceholderText("db9 Cloud Drive"), { target: { value: "Created Alerts" } });
   const registrationPanel = screen.getByTestId("developer-app-notifications");
-  const unavailableSwitch = within(registrationPanel).getByRole("switch", { name: "Enable App Notifications" });
+  const unavailableSwitch = within(registrationPanel).getByRole("switch", { name: "Enable Webhook" });
   assert.equal(unavailableSwitch.hasAttribute("data-disabled"), true);
   assert.ok(within(registrationPanel).getByText("Save the app before enabling its webhook."));
   assert.equal(within(registrationPanel).queryByTestId("app-notifications-permission-picker"), null);
+  const permissionPanel = screen.getByTestId("developer-app-permissions");
+  fireEvent.click(within(permissionPanel).getByRole("combobox", { name: "Agent · read" }));
+  fireEvent.pointerDown(screen.getByRole("option", { name: "Read-only" }), { pointerType: "mouse" });
+  fireEvent.click(screen.getByRole("option", { name: "Read-only" }));
   const registrationForm = registrationPanel.closest("form");
   assert.ok(registrationForm);
   fireEvent.click(within(registrationForm).getByRole("button", { name: "Register app" }));
-
-  assert.ok(await screen.findByText("raft_secret_create_once"));
-  assert.equal(createCount, 1);
-  assert.equal(permissionCount, 0);
-
-  const myAppsTab = await screen.findByTestId("connected-apps-my-apps-tab");
-  fireEvent.click(within(myAppsTab).getByRole("button", { name: "Edit" }));
-  const editPanel = await screen.findByTestId("developer-app-notifications");
-  const enableSwitch = within(editPanel).getByRole("switch", { name: "Enable App Notifications" });
-  await waitFor(() => assert.equal(enableSwitch.hasAttribute("data-disabled"), false));
-  fireEvent.click(enableSwitch);
-  const notificationPicker = await within(editPanel).findByTestId("app-notifications-permission-picker");
-  fireEvent.click(within(notificationPicker).getByText("Server"));
-  fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
   assert.ok(await screen.findByText("permission write failed"));
   assert.ok(screen.getByText("raft_secret_create_once"));
@@ -1510,7 +1505,7 @@ test("Connected Apps retries permissions without recreating an app or losing its
   fireEvent.click(screen.getByRole("button", { name: "Save" }));
   await waitFor(() => assert.equal(permissionCount, 2));
   assert.equal(createCount, 1);
-  assert.equal(patchCount, 2);
+  assert.equal(patchCount, 1);
   assert.ok(screen.getByText("raft_secret_create_once"));
 });
 

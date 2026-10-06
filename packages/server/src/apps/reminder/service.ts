@@ -155,6 +155,60 @@ async function resolveReminderTargetChannel(
   };
 }
 
+type ReminderTargetChannel = { id: string; name: string | null; type: string };
+
+/**
+ * resolveReminderTargetChannel for a whole list: the distinct target channels
+ * of each server through channelService.resolveChannelAccessMany (the single
+ * entry point of the local/joint access rule), so at most two queries per
+ * server instead of one resolveChannelAccess per reminder. Listing an agent's
+ * reminders used to resolve each one under Promise.all, so ~170 reminders
+ * borrowed ~170 pool connections at once (prod 2026-10-06 02:36Z).
+ */
+async function resolveReminderTargetChannels(
+  rows: Array<Pick<ReminderRow, "id" | "serverId" | "targetChannelId" | "payload">>,
+  opts: ReminderServiceOptions,
+): Promise<Map<string, ReminderTargetChannel | null>> {
+  const result = new Map<string, ReminderTargetChannel | null>();
+  const channelIdByRow = new Map<string, string>();
+  // The onboarding day-2 fallback (no explicit target) is rare; resolve it once
+  // per server.
+  const onboardingChannelByServer = new Map<string, Promise<string | null>>();
+  for (const row of rows) {
+    if (row.targetChannelId) {
+      channelIdByRow.set(row.id, row.targetChannelId);
+    } else if (isOnboardingDay2Reminder(row)) {
+      if (!onboardingChannelByServer.has(row.serverId)) {
+        onboardingChannelByServer.set(row.serverId, resolveOnboardingOwnerChannelId(row, opts));
+      }
+      const channelId = await onboardingChannelByServer.get(row.serverId)!;
+      if (channelId) channelIdByRow.set(row.id, channelId);
+      else result.set(row.id, null);
+    }
+  }
+
+  const channelIdsByServer = new Map<string, string[]>();
+  for (const row of rows) {
+    const channelId = channelIdByRow.get(row.id);
+    if (!channelId) continue;
+    const ids = channelIdsByServer.get(row.serverId) ?? [];
+    ids.push(channelId);
+    channelIdsByServer.set(row.serverId, ids);
+  }
+  const accessByServer = new Map<string, Map<string, channelService.ChannelAccessResolution>>();
+  for (const [serverId, channelIds] of channelIdsByServer) {
+    accessByServer.set(serverId, await channelService.resolveChannelAccessMany({ serverId, channelIds }));
+  }
+
+  for (const row of rows) {
+    const channelId = channelIdByRow.get(row.id);
+    if (!channelId) continue;
+    const access = accessByServer.get(row.serverId)?.get(channelId);
+    result.set(row.id, access ? { id: access.channel.id, name: access.channel.name, type: access.channel.type } : null);
+  }
+  return result;
+}
+
 function formatTopLevelChannelRef(
   channel: { name: string | null; type: string } | null,
 ): string | null {
@@ -1385,11 +1439,7 @@ export async function toReminderSummaries(
     appUrl: getConfiguredAppUrl(),
   };
   const anchors = await resolveAnchors(rows, ctx, opts);
-  const targetChannels = new Map<string, { id: string; name: string | null; type: string } | null>();
-  await Promise.all(rows.map(async (row) => {
-    if (!row.targetChannelId && !isOnboardingDay2Reminder(row)) return;
-    targetChannels.set(row.id, await resolveReminderTargetChannel(row, opts));
-  }));
+  const targetChannels = await resolveReminderTargetChannels(rows, opts);
   return rows.map((r) => {
     const a = anchors.get(r.id) ?? { msgRef: null, msgPermalink: null };
     const targetChannel = targetChannels.get(r.id);

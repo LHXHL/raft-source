@@ -6,6 +6,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { and, eq, inArray } from "drizzle-orm";
 
 import {
+  agents,
   externalAppRegistrations,
   integrationAuditEvents,
   oauthAccessRequests,
@@ -453,6 +454,11 @@ test("App Notifications management exposes truthful state without replaying secr
       .limit(1);
     assert.ok(installation);
 
+    const mintGroups = (groups: string[]) => fetch(`${app.baseUrl}/api/oauth/installation-token`, {
+      method: "POST",
+      headers: { Authorization: `Basic ${Buffer.from(`${client.clientId}:${clientSecret}`).toString("base64")}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ installation_id: installation.id, groups }),
+    });
     const installStateUrl = `${app.baseUrl}/api/integrations/marketplace/${client.id}/install/app-notifications`;
     const defaultInstallRead = await fetch(installStateUrl, { headers: headers(installerToken, installServer.id) });
     assert.equal(defaultInstallRead.status, 200);
@@ -542,6 +548,12 @@ test("App Notifications management exposes truthful state without replaying secr
     assert.deepEqual(pendingInstallerState.approved_groups, ["server"]);
     assert.deepEqual(pendingInstallerState.effective_events, ["server.config_updated", "server.plan_changed"]);
     assert.equal(pendingInstallerState.approval_required, true);
+    assert.equal((await mintGroups(["agent"])).status, 400, "declaration expansion alone cannot mint newly requested read authority");
+    const oldAuthority = await mintGroups(["server"]);
+    assert.equal(oldAuthority.status, 200, "previously approved access remains usable pending approval");
+    const oldCredential = await oldAuthority.json() as { access_token: string };
+    assert.equal((await fetch(`${app.baseUrl}/api/app-installation/agents`, { headers: { Authorization: `Bearer ${oldCredential.access_token}` } })).status, 403);
+
 
     const preApprovalSubscription = await updateSubscriptions([
       "agent.model_changed",
@@ -555,6 +567,12 @@ test("App Notifications management exposes truthful state without replaying secr
       headers: headers(installerToken, installServer.id),
     });
     assert.equal(grantRes.status, 200);
+    const agentAuthority = await mintGroups(["agent"]);
+    assert.equal(agentAuthority.status, 200);
+    const agentCredential = await agentAuthority.json() as { access_token: string };
+    const appDirectory = await fetch(`${app.baseUrl}/api/app-installation/agents`, { headers: { Authorization: `Bearer ${agentCredential.access_token}` } });
+    assert.equal(appDirectory.status, 200, "administrator grant enables App read without principal login");
+
     const finalSubscriptionRes = await updateSubscriptions([
       "agent.model_changed",
       "server.config_updated",
@@ -3147,15 +3165,18 @@ test("server-local permission save atomically installs its source and grants ins
   const localAgent = await createAgent(server.id, "LocalAppVisible", { runtime: "codex" });
   const foreignAgent = await createAgent(foreign.id, "LocalAppHidden", { runtime: "codex" });
   const permissionUrl = `${app.baseUrl}/api/integrations/clients/${client.id}/app-notifications/permissions`;
-  const save = (token: string, serverId = server.id, groups = ["agent"]) => fetch(permissionUrl, {
+  const save = (token: string, serverId = server.id, groups = ["agent"], events = groups.includes("agent") ? ["agent.status_changed"] : []) => fetch(permissionUrl, {
     method: "PUT", headers: headers(token, serverId),
-    body: JSON.stringify({ groups, events: groups.includes("agent") ? ["agent.status_changed"] : [] }),
+    body: JSON.stringify({ groups, events }),
   });
   const installs = () => getDb().select().from(oauthClientInstalls).where(eq(oauthClientInstalls.clientId, client.id));
   assert.equal((await save(memberToken)).status, 403);
   assert.equal((await save(ownerToken, foreign.id)).status, 403);
   assert.equal((await installs()).length, 0, "unauthorized saves must not create an installation");
-  assert.equal((await save(ownerToken)).status, 200);
+  assert.equal((await save(ownerToken, server.id, ["agent"], [])).status, 200);
+  assert.equal((await getDb().select().from(oauthAppWebhookConfigs).where(eq(oauthAppWebhookConfigs.clientId, client.id))).length, 0, "read-only App needs no webhook configuration");
+  assert.equal((await getDb().select().from(oauthGrants).where(eq(oauthGrants.clientId, client.id))).length, 0, "App read needs no principal login grant");
+  await getDb().update(agents).set({ avatarUrl: "pixel:random:installation-picture" }).where(eq(agents.id, localAgent.id));
   const [installation] = await installs();
   assert.ok(installation, "permission save must create the missing source installation");
   assert.equal(installation.serverId, server.id);
@@ -3181,9 +3202,27 @@ test("server-local permission save atomically installs its source and grants ins
   const read = () => fetch(`${app.baseUrl}/api/app-installation/agents`, { headers: { Authorization: `Bearer ${credential.access_token}` } });
   const agentRead = await read();
   assert.equal(agentRead.status, 200);
-  const projected = await agentRead.json() as { agents: Array<{ id: string }> };
+  const projected = await agentRead.json() as { agents: Array<{ id: string; avatar_url: string | null }> };
   assert.ok(projected.agents.some((agent) => agent.id === localAgent.id));
   assert.equal(projected.agents.some((agent) => agent.id === foreignAgent.id), false);
+  const localProjection = projected.agents.find((agent) => agent.id === localAgent.id)!;
+  assert.match(localProjection.avatar_url!, /^https?:\/\//);
+  const storedAvatar = await getDb().select({ avatarUrl: agents.avatarUrl }).from(agents).where(eq(agents.id, localAgent.id));
+  assert.equal(storedAvatar[0].avatarUrl, "pixel:random:installation-picture", "normalization is a response projection, not a storage rewrite");
+  const avatar = await fetch(`${app.baseUrl}${new URL(localProjection.avatar_url!).pathname}`);
+  assert.equal(avatar.status, 200);
+  assert.match(await avatar.text(), /<svg/);
+  for (const [raw, expected] of [[null, null], ["https://[invalid", null], ["pixel:", null], ["https://images.example.test/avatar.png", "https://images.example.test/avatar.png"], ["/api/avatars/example.png", "/api/avatars/example.png"]] as const) {
+    await getDb().update(agents).set({ avatarUrl: raw }).where(eq(agents.id, localAgent.id));
+    const body = await (await read()).json() as { agents: typeof projected.agents };
+    const entry = body.agents.find((agent) => agent.id === localAgent.id)!;
+    if (expected === null) assert.equal(entry.avatar_url, null);
+    else if (expected.startsWith("/")) assert.equal(new URL(entry.avatar_url!).pathname, expected);
+    else assert.equal(entry.avatar_url, expected);
+  }
+  // Selecting events is a later, independent step; directory access already works.
+  assert.equal((await save(ownerToken)).status, 200);
+
   const subscribe = await fetch(`${app.baseUrl}/api/oauth/installations/${installation.id}/subscriptions`, {
     method: "PUT", headers: auth, body: JSON.stringify({ events: ["agent.status_changed"] }),
   });

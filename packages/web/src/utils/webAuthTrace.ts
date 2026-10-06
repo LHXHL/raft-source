@@ -427,14 +427,6 @@ const tabId: string = (() => {
   }
 })();
 
-/**
- * This tab's random id (one per page load). Product events use it as their
- * `client_session_id` so they join to this tab's traces (RFC-066 §3.3).
- */
-export function getWebTabId(): string {
-  return tabId;
-}
-
 function dropUndefined(attrs: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(attrs)) {
@@ -608,6 +600,13 @@ const TERMINAL_VERDICT_MIRROR_TTL_MS = 10_000;
 // hydration a bounded window without creating a permanent logged-out loop.
 const MAX_ELIGIBILITY_ATTEMPTS = 8;
 
+// The scheduled path reuses one scope attestation per (server, principal)
+// until shortly before it expires (server TTL is 10 min). A busy page fills a
+// batch about once a second, and fetching a fresh attestation for each one
+// doubled the trace request rate. The receiver verifies signature + exp only.
+const ATTESTATION_REUSE_MARGIN_MS = 60_000;
+let cachedAttestation: { serverId: string; principalId: string; attestation: string; expiresAtMs: number } | null = null;
+
 // Registered synchronously by serverStore at startup. We do NOT import
 // serverStore here (that would re-create the webAuthTrace -> serverStore ->
 // api/client -> auth policy -> webAuthTrace cycle, and would force an async
@@ -711,28 +710,48 @@ export async function flushAuthTraces(): Promise<void> {
     assertValidDesktopRuntimeEnvironment();
 
     const fetchImpl = getFetch();
-    const attestationResponse = await fetchImpl(`${API_BASE}/servers/${serverId}/scope-attestation`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-        "X-Server-Id": serverId,
-      },
-      body: JSON.stringify({ scope: WEB_TRACE_SCOPE }),
-    });
-    if (!attestationResponse.ok) return; // 4xx/5xx -> drop, no refresh/logout
-    const data = (await attestationResponse.json()) as { attestation?: string };
-    if (!data?.attestation) return;
+    let attestation: string;
+    const reusable = cachedAttestation
+      && cachedAttestation.serverId === serverId
+      && cachedAttestation.principalId === principalId
+      && cachedAttestation.expiresAtMs - Date.now() > ATTESTATION_REUSE_MARGIN_MS;
+    if (reusable) {
+      attestation = cachedAttestation!.attestation;
+    } else {
+      cachedAttestation = null;
+      const attestationResponse = await fetchImpl(`${API_BASE}/servers/${serverId}/scope-attestation`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+          "X-Server-Id": serverId,
+        },
+        body: JSON.stringify({ scope: WEB_TRACE_SCOPE }),
+      });
+      if (!attestationResponse.ok) return; // 4xx/5xx -> drop, no refresh/logout
+      const data = (await attestationResponse.json()) as { attestation?: string; expiresAt?: string };
+      if (!data?.attestation) return;
+      attestation = data.attestation;
+      const expiresAtMs = data.expiresAt ? Date.parse(data.expiresAt) : Number.NaN;
+      // Only cache when the server says how long it is valid.
+      if (Number.isFinite(expiresAtMs)) {
+        cachedAttestation = { serverId, principalId, attestation, expiresAtMs };
+      }
+    }
 
-    await fetchImpl(`${TRACE_URL}/api/web-traces`, {
+    const traceResponse = await fetchImpl(`${TRACE_URL}/api/web-traces`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        attestation: data.attestation,
+        attestation,
         records,
         ...(events.length > 0 ? { events } : {}),
       }),
     });
+    // A rejected attestation (e.g. secret rotation) must not be reused.
+    if (traceResponse && (traceResponse.status === 401 || traceResponse.status === 403)) {
+      cachedAttestation = null;
+    }
   } catch {
     // Swallow: tracing failure must never affect auth state.
   } finally {
@@ -1025,6 +1044,7 @@ export async function emitWebEventAndFlushBeforeUnload(
  */
 export function __resetAuthTraceForTest(opts: { traceUrl?: string | null } = {}): void {
   queue = [];
+  cachedAttestation = null;
   lastTerminalAuthVerdictAttrs = null;
   lastTerminalAuthVerdictAt = 0;
   flushing = false;

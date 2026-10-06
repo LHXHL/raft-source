@@ -4,6 +4,49 @@ import { normalizeObservedRoutePattern } from "../middleware/requestObservabilit
 import { addTraceEvent, errorClassOf, getCurrentTraceContext } from "../tracing/semanticTrace";
 import { sanitizeRouteErrorMessage } from "../tracing/routeFailure";
 import { DmTargetResolutionError } from "../services/dmTargetResolutionError";
+import { RisingWaveOverloadedError } from "../db/risingwave";
+import { setRequestTraceErrorCode } from "../middleware/requestObservability";
+
+/** Seconds a client should wait before retrying a RisingWave-overloaded read. */
+export const RISINGWAVE_OVERLOAD_RETRY_AFTER_SECONDS = 2;
+
+function findRisingWaveOverload(err: unknown): RisingWaveOverloadedError | null {
+  for (let current = err, depth = 0; current && depth < 5; depth += 1) {
+    if (current instanceof RisingWaveOverloadedError) return current;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return null;
+}
+
+/**
+ * The RisingWave pool was saturated (every connection busy past the acquire
+ * timeout): a temporary overload, not a server bug. Answer 503 + Retry-After so
+ * clients retry and 5xx-bug monitoring does not count it. There is deliberately
+ * no Postgres fallback: these reads moved to RisingWave because the Postgres
+ * versions are expensive, and shifting them onto the primary during an RW
+ * slowdown would turn one incident into two (Tenny, 2026-10-06).
+ */
+export function respondToRisingWaveOverload(err: unknown, res: Response): boolean {
+  const overload = findRisingWaveOverload(err);
+  if (!overload) return false;
+  addTraceEvent("server.route.rw_overloaded", {
+    event_kind: "route_error_response",
+    outcome: "error",
+    reason: "rw_overloaded",
+    http_status: 503,
+    error_class: "RisingWaveOverloadedError",
+  });
+  // Also on the request's own span (server.http.request error_code), so
+  // dashboards filter overloads by column instead of expanding span events.
+  setRequestTraceErrorCode(res, "rw_overloaded");
+  res.setHeader("Retry-After", String(RISINGWAVE_OVERLOAD_RETRY_AFTER_SECONDS));
+  res.status(503).json({
+    error: "Temporarily overloaded, retry shortly",
+    code: "rw_overloaded",
+    retryable: true,
+  });
+  return true;
+}
 
 interface JsonServerErrorOptions {
   error: string;
@@ -45,6 +88,7 @@ export function sendJsonServerError(
   // A route that wraps channel resolution in a generic catch must still tell
   // the caller how to fix an ambiguous or malformed DM target.
   if (respondToDmTargetResolutionError(options.err, res)) return;
+  if (respondToRisingWaveOverload(options.err, res)) return;
   const status = options.status ?? 500;
   const correlationId = getCurrentTraceContext()?.traceId ?? randomUUID();
   const errorClass = errorClassOf(options.err);
@@ -89,6 +133,7 @@ export const globalJsonServerErrorHandler: ErrorRequestHandler = (err, req, res,
   // A DM target the caller can fix (ambiguous same-name peer, unknown peer
   // kind): answer with its 4xx status and machine-readable code.
   if (respondToDmTargetResolutionError(err, res)) return;
+  if (respondToRisingWaveOverload(err, res)) return;
 
   const candidateStatus = Number((err as { status?: unknown; statusCode?: unknown } | null)?.status
     ?? (err as { statusCode?: unknown } | null)?.statusCode);

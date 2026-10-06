@@ -23,6 +23,8 @@ import { asAxSurfaceText, type AgentConfig, type AxSurfaceText, type MachineToSe
 import { AgentProcessManager } from "./agentProcessManager";
 import { installManagedRunnerCredentialFetch } from "./testing/managedRunnerCredentialFetch";
 import type { RuntimeDriver, SpawnContext, SpawnResult, ParsedEvent } from "./drivers/index";
+import { drainAgentManagerForTests, releaseAgentManagerForTests } from "./testing/agentManagerTeardown";
+import { takeRecordedNetworkAttempts } from "./testing/networkGuard";
 
 class FakeChildProcess extends EventEmitter {
   stdout = new EventEmitter();
@@ -141,13 +143,7 @@ async function withManager(
   try {
     await fn({ driver, manager, dataDir, sent });
   } finally {
-    if ((manager as any).agentStartPumpTimer) clearTimeout((manager as any).agentStartPumpTimer);
-    for (const ap of (manager as any).agents?.values?.() ?? []) {
-      ap.notifications.clearTimer();
-      if (ap.activityHeartbeat?.kind === "active") clearInterval(ap.activityHeartbeat.timer);
-      if (ap.startup?.kind === "waiting" && ap.startup.timer) clearTimeout(ap.startup.timer);
-    }
-    (manager as any).agents?.clear?.();
+    await releaseAgentManagerForTests(manager);
     await rm(dataDir, { recursive: true, force: true });
   }
 }
@@ -364,6 +360,37 @@ test("a message that arrives untold during a cold-idle stop still wakes the agen
 
     assert.equal(wakes.length, 1, "the untold message restarts the agent");
     assert.equal((wakes[0] as { seq: number }).seq, 302, "and it, not the deferred unread, is the wake message");
+    // The restart is queued and mints its runner credential later. Let it
+    // finish while this test's mint answer is installed; otherwise the mint
+    // reaches the network during the next test.
+    const deadline = Date.now() + 5_000;
+    while (ctx.driver.processes.length < 2 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(ctx.driver.processes.length, 2, "the restart spawned before the test ends");
+  });
+});
+
+test("test teardown fences a restart still queued when the test ends: nothing reaches the network afterwards", async () => {
+  const restoreMint = installManagedRunnerCredentialFetch();
+  await withManager(async (ctx) => {
+    const ap = await startIdleColdAgent(ctx, "agent-teardown-fence", "session-teardown-fence");
+    const untold = coldIdleFixture(402);
+    ap.inbox.push(untold);
+    (ctx.manager as any).commitGatedSteeringDecisionState("agent-teardown-fence", ap, {
+      ...ap.gatedSteering,
+      expectedTerminationReason: "cold_idle_recycle",
+    });
+    await ap.runtime.stop({ signal: "SIGTERM", reason: "cold_idle_recycle" });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(ctx.driver.processes.length, 1, "precondition: the restart is still pending");
+
+    // What withManager's teardown does, followed by the mint answer going away.
+    await drainAgentManagerForTests(ctx.manager);
+    restoreMint();
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.deepEqual(takeRecordedNetworkAttempts(), [], "no mint after teardown");
+    assert.equal(ctx.driver.processes.length, 1, "no spawn after teardown");
   });
 });
 

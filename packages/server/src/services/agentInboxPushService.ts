@@ -12,6 +12,11 @@
 // never coordinate across replicas, but every sweep send is claimed on the
 // registration row, so one replica sends it.
 //
+// Third-party app events (POST /api/oauth/agent-events) have no durable inbox
+// row. Each is announced as its own `agent-event:<id8>` target, once per
+// event id, never after it expires; the sweep reads the agent's unacknowledged
+// events from their table, since the chain does not hold them.
+//
 // Durability without a queue: a periodic sweep sends a notice for any agent
 // whose inbox has unread written after its last delivered notice (a notice
 // lost to a crash or a failing endpoint), and a reminder (at most one per
@@ -45,6 +50,7 @@ import type { AgentOrchestrator } from "./agentOrchestrator";
 import {
   appWebhookDeliveryErrorCode,
   postPublicHttps,
+  WebhookPostError,
   type WebhookPost,
   type WebhookPostTiming,
 } from "./appNotificationDeliveryService";
@@ -56,12 +62,23 @@ import {
 } from "./appWebhookConfigService";
 import { currentRaftTraceId, raftTraceIdHeaders } from "./externalRequestCorrelation";
 import * as messageService from "./messageService";
+import * as oauthService from "./oauthService";
 
 export const AGENT_INBOX_NOTICE_SCHEMA = "raft-agent-inbox-notice.v1";
 /** Consecutive 401/404/410 responses that disable a registration. */
 export const AGENT_INBOX_PUSH_REJECTION_LIMIT = 3;
-/** Backoff after the Nth consecutive failure (the last entry repeats). */
-export const AGENT_INBOX_PUSH_RETRY_DELAYS_MS: readonly number[] = [5_000, 15_000, 60_000, 5 * 60_000, 15 * 60_000, 30 * 60_000];
+/**
+ * Backoff after the Nth consecutive failure (the last entry repeats). Capped at
+ * 5 minutes: a notice is a small POST, and a longer cap only makes an agent
+ * wait after its receiver is back (prod 10-05: a 30-minute cap added up to
+ * half an hour to a 77-minute outage).
+ */
+export const AGENT_INBOX_PUSH_RETRY_DELAYS_MS: readonly number[] = [5_000, 15_000, 60_000, 5 * 60_000];
+/**
+ * 5xx and timeouts wait at most 5 minutes, a 503's Retry-After included; a 429
+ * follows the receiver's Retry-After, up to 60 minutes (RETRY_AFTER_MAX_MS).
+ */
+export const AGENT_INBOX_PUSH_RETRY_CAP_MS = 5 * 60_000;
 /**
  * Backoff after a 400 (the receiver refused the body as invalid): retried on
  * this long schedule, since the receiver may deploy a fix; never disables.
@@ -88,6 +105,8 @@ export const AGENT_INBOX_NOTICE_SWEEP_INTERVAL_MS = 60_000;
  */
 export const AGENT_INBOX_NOTICE_REMIND_AFTER_MS = 5 * 60_000;
 const SWEEP_BATCH_SIZE = 50;
+/** Pending third-party events one sweep notice lists per agent. */
+const SWEEP_EVENT_LIMIT = 50;
 const SECRET_MAX_LENGTH = 512;
 
 export type AgentInboxPushDisabledReason = "endpoint_rejected" | "credential_revoked" | "agent_inactive";
@@ -304,16 +323,59 @@ function toNoticeTarget(row: AgentInboxTargetRow): AgentInboxNoticeTarget {
   return target as AgentInboxNoticeTarget;
 }
 
+/**
+ * A third-party app event has no durable inbox row, so it gets a row of its
+ * own addressed `agent-event:<id8>`, the target `raft message read` re-reads
+ * it by. One event is one row, so the same event announced twice (direct push
+ * and sweep, or a retry) is one row with one pending message.
+ */
+function thirdPartyEventRow(message: AgentMessage): AgentInboxTargetRow | null {
+  const eventId = message.third_party_event?.id;
+  if (typeof eventId !== "string" || eventId.length === 0) return null;
+  return {
+    target: `agent-event:${eventId.slice(0, 8)}`,
+    pendingCount: 1,
+    firstPendingMsgId: eventId,
+    latestMsgId: eventId,
+    latestSenderName: message.sender_name,
+    latestSenderType: "third_party_app",
+    flags: [],
+  };
+}
+
+function isThirdPartyEventTarget(target: string): boolean {
+  return target.startsWith("agent-event:");
+}
+
 /** Pending rows of one agent, merged by target (seqs kept internally for "latest"). */
 class PendingNotice {
   readonly rows = new Map<string, AgentInboxTargetRow>();
+  /** Expiry of each third-party event row, by target: an expired event is never announced. */
+  readonly eventExpiresAtMs = new Map<string, number>();
   /** Earliest message write among the pending rows (latency: write -> 2xx). */
   oldestWriteAtMs: number | null = null;
 
   addMessage(message: AgentMessage): void {
-    for (const row of projectAgentInboxSnapshot([message])) this.addRow(row);
+    const eventRow = message.third_party_event ? thirdPartyEventRow(message) : null;
+    if (message.third_party_event && !eventRow) return;
+    if (eventRow) {
+      const expiresAt = Date.parse(message.third_party_event?.expires_at ?? "");
+      if (Number.isFinite(expiresAt)) this.eventExpiresAtMs.set(eventRow.target, expiresAt);
+      this.addRow(eventRow);
+    } else {
+      for (const row of projectAgentInboxSnapshot([message])) this.addRow(row);
+    }
     const writtenAt = typeof message.timestamp === "string" ? Date.parse(message.timestamp) : Number.NaN;
     if (Number.isFinite(writtenAt)) this.oldestWriteAtMs = Math.min(this.oldestWriteAtMs ?? writtenAt, writtenAt);
+  }
+
+  /** Drop third-party event rows whose event has expired. */
+  dropExpired(nowMs: number): void {
+    for (const [target, expiresAtMs] of this.eventExpiresAtMs) {
+      if (expiresAtMs > nowMs) continue;
+      this.rows.delete(target);
+      this.eventExpiresAtMs.delete(target);
+    }
   }
 
   addRow(row: AgentInboxTargetRow): void {
@@ -322,6 +384,8 @@ class PendingNotice {
       this.rows.set(row.target, { ...row, flags: [...row.flags] });
       return;
     }
+    // The same event again: still one event.
+    if (isThirdPartyEventTarget(row.target)) return;
     const newer = (row.latestSeq ?? 0) >= (existing.latestSeq ?? 0) ? row : existing;
     const older = newer === row ? existing : row;
     this.rows.set(row.target, {
@@ -340,6 +404,9 @@ class PendingNotice {
   /** Merge another pending notice in (a failed notice put back under newer rows). */
   absorb(other: PendingNotice): void {
     for (const row of other.rows.values()) this.addRow(row);
+    for (const [target, expiresAtMs] of other.eventExpiresAtMs) {
+      if (!this.eventExpiresAtMs.has(target)) this.eventExpiresAtMs.set(target, expiresAtMs);
+    }
     if (other.oldestWriteAtMs !== null) {
       this.oldestWriteAtMs = Math.min(this.oldestWriteAtMs ?? other.oldestWriteAtMs, other.oldestWriteAtMs);
     }
@@ -390,6 +457,11 @@ function classify(status: number, errorCode: string | null, retryAfter: string |
   if (status === 401 || status === 404 || status === 410) return { kind: "rejected", error: `http_${status}` };
   if (status === 400) return { kind: "bad_request", error: "http_400" };
   if (status === 429) return { kind: "retry", error: "http_429", retryAfterMs: parseRetryAfterMs(retryAfter, now) };
+  // A 503 may say when to come back, but never later than the backoff cap.
+  if (status === 503) {
+    const retryAfterMs = parseRetryAfterMs(retryAfter, now);
+    return { kind: "retry", error: "http_503", retryAfterMs: retryAfterMs === null ? null : Math.min(retryAfterMs, AGENT_INBOX_PUSH_RETRY_CAP_MS) };
+  }
   return { kind: "retry", error: status > 0 ? `http_${status}` : (errorCode ?? "network_error"), retryAfterMs: null };
 }
 
@@ -444,7 +516,7 @@ export type AgentInboxNoticeMode = "direct" | "retry" | "sweep";
 export type AgentInboxNoticeSweepReason = "new" | "remind";
 
 export interface AgentInboxNoticeResult {
-  outcome: "delivered" | "rejected" | "bad_request" | "retry" | "backoff" | "disabled" | "unregistered";
+  outcome: "delivered" | "rejected" | "bad_request" | "retry" | "backoff" | "disabled" | "unregistered" | "nothing_to_send";
   /** When a failed notice should be tried again (in-memory retry on this replica). */
   retryInMs?: number;
 }
@@ -478,6 +550,9 @@ export async function sendAgentInboxNotice(input: {
     addTraceEvent("agent_inbox_push.disabled", { reason: sendable.disabledReason });
     return { outcome: "disabled" };
   }
+  // Only third-party events that expired while waiting: nothing left to announce.
+  input.pending.dropExpired(now.getTime());
+  if (input.pending.empty) return { outcome: "nothing_to_send" };
   // A failing endpoint is on its backoff; the notice waits (merged) until then.
   if (registration.consecutiveFailures > 0 && registration.nextAttemptAt.getTime() > now.getTime()) {
     return { outcome: "backoff", retryInMs: registration.nextAttemptAt.getTime() - now.getTime() };
@@ -515,6 +590,7 @@ export async function sendAgentInboxNotice(input: {
       let errorCode: string | null = null;
       let responseRequestId: string | null = null;
       let timing: WebhookPostTiming | undefined;
+      let timeoutPhase: WebhookPostError["timeoutPhase"] = null;
       try {
         const secret = decryptWebhookSigningSecret({
           ciphertext: registration.secretCiphertext,
@@ -542,6 +618,12 @@ export async function sendAgentInboxNotice(input: {
         timing = response.timing;
       } catch (error) {
         errorCode = appWebhookDeliveryErrorCode(error);
+        // The phases that did complete (connect, TLS) before the failure, and
+        // where a timeout stopped.
+        if (error instanceof WebhookPostError) {
+          timing = error.timing;
+          timeoutPhase = error.timeoutPhase;
+        }
       }
       const finishedAt = clock();
       const outcome = classify(status, errorCode, retryAfter, finishedAt);
@@ -556,6 +638,8 @@ export async function sendAgentInboxNotice(input: {
         // Earliest message in the notice: its write to the receiver's answer.
         latency_ms: latencyMs,
         error_code: outcome.kind === "delivered" ? null : outcome.error,
+        // connect: TCP/TLS never finished; response: connected, no first byte.
+        "push.timeout_phase": timeoutPhase,
         "push.response_request_id": responseRequestId,
         // Cumulative ms from the start of the POST: DNS lookup, TCP connect, TLS
         // handshake, first response byte. connect/tls are absent on a reused socket.
@@ -666,6 +750,19 @@ async function readUnreadForNotice(
     if (typeof message.seq === "number" && handedOver.has(message.seq)) continue;
     pending.addMessage(message);
     if (typeof message.seq === "number") maxSeq = Math.max(maxSeq, message.seq);
+    const writtenAt = typeof message.timestamp === "string" ? Date.parse(message.timestamp) : Number.NaN;
+    if (lastDeliveryAt === null || !Number.isFinite(writtenAt) || writtenAt > lastDeliveryAt.getTime()) newSinceLastNotice = true;
+  }
+  // Third-party events have no row in the chain; the agent's unacknowledged,
+  // unexpired ones are read from their own table. One written after the last
+  // delivered notice was never announced (its direct notice was lost).
+  const pendingEvents = await withStepTimeout(
+    "agent event read",
+    AGENT_INBOX_NOTICE_SWEEP_READ_TIMEOUT_MS,
+    oauthService.listPendingThirdPartyAgentEventMessages({ agentId, limit: SWEEP_EVENT_LIMIT }),
+  );
+  for (const message of pendingEvents) {
+    pending.addMessage(message);
     const writtenAt = typeof message.timestamp === "string" ? Date.parse(message.timestamp) : Number.NaN;
     if (lastDeliveryAt === null || !Number.isFinite(writtenAt) || writtenAt > lastDeliveryAt.getTime()) newSinceLastNotice = true;
   }
@@ -866,7 +963,7 @@ export function startAgentInboxPushWorker(input: {
     } finally {
       state.inFlight = false;
     }
-    if (result.outcome === "delivered" || result.outcome === "disabled" || result.outcome === "unregistered") {
+    if (result.outcome === "delivered" || result.outcome === "disabled" || result.outcome === "unregistered" || result.outcome === "nothing_to_send") {
       if (result.outcome !== "delivered") state.pending = new PendingNotice();
       if (!state.pending.empty) void send(agentId, "direct");
       else if (state.retryTimer === null) states.delete(agentId);
@@ -887,7 +984,10 @@ export function startAgentInboxPushWorker(input: {
     if (typeof agentId !== "string" || stopped) return;
     const candidate = message as AgentMessage | undefined;
     if (!candidate || typeof candidate !== "object") return;
-    if (!Number.isInteger(candidate.seq) || (candidate.seq ?? 0) <= 0 || candidate.third_party_event) return;
+    // A persisted message (positive seq), or a third-party app event, which has
+    // no durable row and is announced by its event id.
+    const durable = Number.isInteger(candidate.seq) && (candidate.seq ?? 0) > 0 && !candidate.third_party_event;
+    if (!durable && !candidate.third_party_event?.id) return;
     stateFor(agentId).pending.addMessage(candidate);
     void send(agentId, "direct");
   };

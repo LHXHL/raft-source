@@ -2262,6 +2262,13 @@
       "when": 1791189888327,
       "tag": "0322_task_events_seq_index",
       "breakpoints": true
+    },
+    {
+      "idx": 323,
+      "version": "7",
+      "when": 1791214741936,
+      "tag": "0323_users_trace_user_id_not_null",
+      "breakpoints": true
     }
   ]
 }

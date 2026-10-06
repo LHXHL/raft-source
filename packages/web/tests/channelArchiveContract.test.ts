@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import {
-  ARCHIVED_CHANNEL_BADGE_CLASS,
   ARCHIVED_CHANNEL_ICON_CLASS,
   ARCHIVED_CHANNEL_MUTED_TEXT_CLASS,
   ARCHIVED_CHANNEL_TEXT_CLASS,
@@ -207,8 +206,4 @@ test("archived channel muted treatment tokens stay pinned", () => {
   assert.equal(ARCHIVED_CHANNEL_TEXT_CLASS, "text-foreground-muted");
   assert.equal(ARCHIVED_CHANNEL_MUTED_TEXT_CLASS, "text-foreground-muted");
   assert.equal(ARCHIVED_CHANNEL_ICON_CLASS, "border-line-muted bg-fill-muted text-foreground-muted");
-  assert.equal(
-    ARCHIVED_CHANNEL_BADGE_CLASS,
-    "border border-line-muted bg-fill-muted px-1 py-0.5 text-[9px] font-bold leading-none text-foreground-muted",
-  );
 });

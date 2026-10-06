@@ -914,6 +914,30 @@ function portInUse(port: number): boolean {
     : sh("lsof", ["-iTCP:" + String(port), "-sTCP:LISTEN", "-P", "-n"], { quiet: true });
   return r.code === 0 && r.stdout.trim() !== "";
 }
+// tmux keeps a login shell after a command exits, and Node --watch may keep
+// its parent alive after the server child exits. Check sockets, not those PIDs.
+// This is listener evidence only, not an HTTP/application health assertion.
+function applicationListeners(e: Env): { name: string; port: number; listening: boolean }[] {
+  const replicas = new Set([1]);
+  for (const window of tmuxWindowNames(e.TMUX_SESSION)) {
+    const match = window.match(/^server-([2-9]|[1-9][0-9]+)$/);
+    if (match && Number(match[1]) <= MAX_REPLICAS) replicas.add(Number(match[1]));
+  }
+  return [
+    ...[...replicas].sort((a, b) => a - b).map((k) => ({
+      name: replicaWindowName(k), port: replicaServerPort(e.OFFSET, k),
+    })),
+    { name: "web", port: e.WEB_PORT },
+  ].map((entry) => ({ ...entry, listening: portInUse(entry.port) }));
+}
+
+function printApplicationListeners(listeners: ReturnType<typeof applicationListeners>): void {
+  for (const { name, port, listening } of listeners) {
+    out(`  Listener   : ${name} :${port} (${listening ? "listening" : "no listener detected"})`);
+  }
+  out("  Listener checks do not verify HTTP health; a missing listener may still be starting.");
+}
+
 function checkPort(port: number, service: string): void {
   if (portInUse(port)) {
     out(`ERROR: Port ${port} (${service}) is already in use.`);
@@ -984,7 +1008,7 @@ Commands:
   start [name] [--description <text>] [--replicas N] [--risingwave[=full|process-only]] [--with-onboarding]
                   Start an isolated dev environment
   stop [name]     Stop and clean up an environment
-  status          Show all running environments
+  status          Show environment resources and application listeners
   seed [name] [--with-onboarding]
                   Re-run seed script; default fixture skips onboarding
   script <name>   Run a repo-owned dev script against an environment
@@ -1000,6 +1024,11 @@ Commands:
 
 Name defaults to the directory basename (e.g., "slock").
 Different names get different ports, so multiple environments can coexist.
+
+Runtime status:
+  status checks application TCP listeners, not HTTP health. A retained tmux
+  session does not prove the server is alive. start with an existing session
+  exits 1 without restarting it; inspect logs, stop, then repeat start/options.
 
 Optional:
   --description <text> on start labels what this preview environment is for.
@@ -1223,9 +1252,10 @@ function cmdStatus(): void {
     const readyServiceCount = Number(postgresRunning) + Number(rustfsRunning) +
       Number(managedRedisRunning || externalRedisListening);
     out(`Environment '${en}':`);
-    if (hasSession && readyServiceCount === 3) {
+    const listeners = hasSession ? applicationListeners(e) : [];
+    if (hasSession && readyServiceCount === 3 && listeners.every((entry) => entry.listening)) {
       const redisState = externalRedisListening ? "; Redis external" : "";
-      out(`  Runtime    : running (tmux session + required services ready${redisState})`);
+      out(`  Runtime    : running (tmux session + required services ready; application ports listening${redisState})`);
     } else if (hasSession || dockerResidueCount > 0) {
       const sessionState = hasSession ? "tmux session present" : "no tmux session";
       out(`  Runtime    : partial/orphan (${sessionState}; ${readyServiceCount}/3 required services ready; ${dockerResidueCount} Docker residue(s))`);
@@ -1233,6 +1263,7 @@ function cmdStatus(): void {
     } else {
       out("  Runtime    : stopped (state only; no tmux session or Docker resources)");
     }
+    if (hasSession) printApplicationListeners(listeners);
     out(`  PostgreSQL : localhost:${15432 + o}`);
     out(`  Postgres   : postgresql://postgres:slock-dev-${en}@localhost:${15432 + o}/slock`);
     out(`  Redis      : localhost:${16379 + o}`);
@@ -2372,9 +2403,11 @@ function cmdStart(args: string[]): void {
   out("");
 
   if (tmuxHasSession(e.TMUX_SESSION)) {
-    out(`Environment '${name}' is already running.`);
+    out(`Environment '${name}': tmux session already exists; no processes were started.`);
+    printApplicationListeners(applicationListeners(e));
     out(`  Attach:  ./raftdev logs ${name}`);
     out(`  Stop:    ./raftdev stop ${name}`);
+    out("  To recover: inspect logs, stop explicitly, then repeat the original start command and options.");
     process.exit(1);
   }
 

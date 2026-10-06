@@ -543,8 +543,8 @@ test("actual RFC bootstrap preserves dependency order and excludes superseded ge
   before("rw_activity_watermark_v5", "rw_inbox_serving_v6");
   before("rw_inbox_serving_v6", "rw_activity_totals_v4");
   before("rw_inbox_muted_full_v1", "rw_conversation_unread_v2");
-  before("rw_receiver_cursors_v1", "rw_followed_threads_v4");
-  before("rw_tasks", "rw_followed_threads_v4");
+  before("rw_receiver_cursors_v1", "rw_followed_threads_v5");
+  before("rw_tasks", "rw_followed_threads_v5");
 
   // Superseded / retired generations must not resurface.
   for (const retired of [
@@ -573,6 +573,8 @@ test("actual RFC bootstrap preserves dependency order and excludes superseded ge
     "rw_conversation_unread_v1",
     "rw_followed_thread_stats_v1",
     "rw_followed_thread_stats_v2",
+    "rw_followed_thread_stats_v3",
+    "rw_followed_threads_v4",
     "rw_message_mentions",
     "rw_inbox_notification_facts_v1",
     "rw_read_mutation_authorities_v1",

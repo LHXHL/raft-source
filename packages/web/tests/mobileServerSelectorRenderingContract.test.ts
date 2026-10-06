@@ -17,7 +17,7 @@ test("mobile server selector preserves its dimensions while vectorizing the slan
     "bg-transparent",
     "px-3",
     "py-1",
-    "text-primary-400",
+    "text-primary-strong",
   ]) {
     assert.match(className, new RegExp(`(?:^|\\s)${originalSurfaceClass.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&")}(?:\\s|$)`));
   }

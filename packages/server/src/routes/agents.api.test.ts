@@ -4155,11 +4155,25 @@ test("onboarding identity adoption previews then applies official Cindy identity
     assert.equal(stillCustom?.description, "Custom setup guide");
     assert.equal(stillCustom?.avatarUrl, "pixel:finch");
 
+    const updatedPushes: Array<{ room: string; payload: unknown }> = [];
+    const originalTo = app.io.to.bind(app.io);
+    (app.io as any).to = (room: string | string[]) => {
+      const operator = originalTo(room as any) as any;
+      const originalEmit = operator.emit.bind(operator);
+      operator.emit = (event: string, ...args: unknown[]) => {
+        if (event === "agent:updated") updatedPushes.push({ room: String(room), payload: args[0] });
+        return originalEmit(event, ...args);
+      };
+      return operator;
+    };
+
     const adoptRes = await fetch(`${app.baseUrl}/api/agents/${customized.id}/onboarding-identity-adoption`, {
       method: "POST",
       headers: authHeaders(ownerToken, server.id),
     });
     assert.equal(adoptRes.status, 200);
+    // Adoption rewrote the name, avatar and description: other open clients are told to re-read.
+    assert.deepEqual(updatedPushes, [{ room: `server:${server.id}`, payload: { agentId: customized.id } }]);
     const adopted = await adoptRes.json() as {
       canAdopt: boolean;
       appliedChanges: Array<{ field: string; before: string | null; after: string | null }>;
@@ -4183,6 +4197,7 @@ test("onboarding identity adoption previews then applies official Cindy identity
       headers: authHeaders(ownerToken, server.id),
     });
     assert.equal(secondAdoptRes.status, 200);
+    assert.equal(updatedPushes.length, 1, "a second adoption changes nothing, so it pushes nothing");
     const secondAdopt = await secondAdoptRes.json() as {
       canAdopt: boolean;
       changes: Array<{ field: string; before: string | null; after: string | null }>;
@@ -5869,6 +5884,55 @@ test("GET /agents records restore-path trace phases with batched creator enrichm
     assert.ok(readyEvent);
     assert.equal(readyEvent.attrs?.agents_count, 2);
     assert.equal(readyEvent.attrs?.env_vars_stripped, false);
+});
+
+test("GET /agents resolves agent activity with at most 8 lookups in flight", async ({ app }) => {
+  const db = getDb();
+  const owner = await seedUser("agents-concurrency-owner@slock.test", "agents-concurrency-owner");
+  const server = await createServer("Agents Concurrency Server", "agents-concurrency-server", owner.id);
+  await db.insert(serverMembers).values({ serverId: server.id, userId: owner.id, role: "owner" }).onConflictDoNothing();
+  const created = [];
+  for (let i = 0; i < 20; i += 1) {
+    created.push(await createAgent(server.id, `concurrency-agent-${i}`, {
+      runtime: "codex",
+      creatorType: "user",
+      creatorId: owner.id,
+    }));
+  }
+
+  // Each activity lookup may borrow pool connections (cache / Redis miss):
+  // a large server must not resolve them all at once.
+  const orchestrator = app.app.get("agentOrchestrator") as { getActivity: (...args: unknown[]) => Promise<unknown> };
+  const originalGetActivity = orchestrator.getActivity.bind(orchestrator);
+  let inFlight = 0;
+  let peak = 0;
+  let calls = 0;
+  orchestrator.getActivity = async (...args: unknown[]) => {
+    inFlight += 1;
+    calls += 1;
+    peak = Math.max(peak, inFlight);
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return await originalGetActivity(...args);
+    } finally {
+      inFlight -= 1;
+    }
+  };
+  try {
+    const ownerToken = await tokenForHuman(owner.email);
+    const res = await fetch(`${app.baseUrl}/api/agents`, {
+      headers: authHeaders(ownerToken, server.id),
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json() as Array<{ id: string; activity: string }>;
+    assert.deepEqual(new Set(body.map((agent) => agent.id)), new Set(created.map((agent) => agent.id)));
+    assert.ok(body.every((agent) => typeof agent.activity === "string"));
+    assert.equal(calls, 20);
+    assert.ok(peak <= 8, `peak ${peak} concurrent activity lookups`);
+    assert.ok(peak > 1, "lookups still overlap");
+  } finally {
+    orchestrator.getActivity = originalGetActivity;
+  }
 });
 
 test("agent-to-agent DM channels are not readable through ordinary human message routes", async ({ app }) => {

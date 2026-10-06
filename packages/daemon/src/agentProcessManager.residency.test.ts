@@ -15,6 +15,7 @@ import { promptConfig } from "./testing/promptFixture";
 import type { AgentLifecycleRecords } from "./agentLifecycleRecord";
 import type { AgentStartPendingDeliveryBuffer } from "./agentStartPendingDeliveryBuffer";
 import type { TerminalRuntimeFailureEvidence } from "./runtimeOutcome";
+import { drainAgentManagerForTests } from "./testing/agentManagerTeardown";
 
 class FakeChild extends EventEmitter {
   exitCode: number | null = null;
@@ -94,6 +95,7 @@ async function withManager(run: (manager: AgentProcessManager) => Promise<void>)
   try {
     await run(manager);
   } finally {
+    await drainAgentManagerForTests(manager);
     try {
       await manager.stopAll();
     } finally {

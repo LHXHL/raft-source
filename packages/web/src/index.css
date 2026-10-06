@@ -97,12 +97,6 @@
   /* Directional occlusion cues for horizontally clipped content. Unlike the
      brutal elevation shadows, these cast inward so the edge reads as another
      item continuing underneath the viewport. */
-  --shadow-overflow-cue-left:
-    inset 8px 0 8px -4px rgb(255 255 255 / 92%),
-    inset 12px 0 12px -8px rgb(20 17 17 / 60%);
-  --shadow-overflow-cue-right:
-    inset -8px 0 8px -4px rgb(255 255 255 / 92%),
-    inset -12px 0 12px -8px rgb(20 17 17 / 60%);
   /* Soft popover shadow for tiny transient overlays (reaction picker,
      tooltip, dropdown menu, hover popover). Exception to brutal hard
      shadow — only valid on surfaces that auto-dismiss on click-outside.
@@ -1057,8 +1051,8 @@
 
 @layer base {
   ::selection {
-    background-color: var(--primary-400);
-    color: var(--primary-950);
+    background-color: var(--primary-soft);
+    color: var(--primary-strong);
   }
 }
 

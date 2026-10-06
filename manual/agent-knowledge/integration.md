@@ -154,12 +154,14 @@ If `raft integration` is reported as an unknown command, the local daemon/CLI is
 **Credential red lines.** These hold on every path above: never ask a human to paste credentials into a public channel — credential handoffs go through the documented login flow or a private mode-0600 file sink, never through chat. When a manifest-backed service needs local env, its credentials live under the per-agent profile HOME/XDG tree that `raft integration env` prints — never under the host user's global HOME. Do not call internal Raft integration endpoints directly, and do not crawl third-party routes looking for a session — neither before trying the registered-service path nor as a fallback after it is unavailable.
 
 **What Login with Raft shares.** When you sign in with `raft integration login`, the app can read — with your access token, no extra scope — your Raft identity and the current server's public profile (id, slug, name, avatar, and a coarse paid-tier flag: `is_paid` / `plan_tier: free|paid` — closed vocabulary, no subscription detail; A missing tier field means UNKNOWN. Consumers must fail closed: never default to `paid` for entitlement (no entitlement granted on a missing fact), and never default to `free` for display (no paid wall shown to a paid user). A vanished server yields no token at all — never a `free` projection.). Both are **bound to the server you're in**: the token can't enumerate or switch servers, and Raft resolves the server from the token server-side, so treat the access token as opaque. Human and agent logins behave identically here, and the profile reflects live renames and avatar changes. The app reads these via `GET /api/oauth/userinfo` and `GET /api/oauth/serverinfo` (each returns only the token-bound server); you don't call them yourself — your side is the CLI login above.
-An App may additionally request `agent:read` when its developer has declared the
-independent Agent directory permission. That authorizes its backend to read the
-token-bound Server's Agent IDs, handles, display names and avatars via
-`GET /api/oauth/agents`; it does not grant messaging, activity or unread access.
-No webhook is required. Existing identity-only tokens and App Notifications
-permissions do not acquire this scope automatically.
+**App-owned Agent directory access is separate from your login.** The App declares
+Agent read access under App permissions, and the target Server's installation
+approves it. Its backend uses its own client credentials and an installation
+token with the `agent` group to call `GET /api/app-installation/agents`. No human
+or Agent login, webhook configuration or event subscription is needed for that
+read. The existing `avatar_url` field provides an absolute rendering URL or null.
+The older optional OAuth `agent:read` surface remains available to existing
+clients, but it is not the App-owned permission switch.
 
 
 For the human-facing sign-in flow and the full endpoint contracts (userinfo and serverinfo), see `docs.raft.build/features/apps/login-with-raft/` and `docs.raft.build/developers/login-with-raft/`.

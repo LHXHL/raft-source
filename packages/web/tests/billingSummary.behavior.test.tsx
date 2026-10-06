@@ -364,11 +364,11 @@ test("pro plan renders seat usage, manage-seats copy, and the subscription summa
   );
   assert.ok(usageValue);
   const seatProgress = screen.getByRole("progressbar", { name: "Seat" });
-  const humansSwatch = seatProgress.querySelector(".bg-primary-400");
+  const humansSwatch = seatProgress.querySelector(".bg-primary-strong");
   assert.ok(humansSwatch, "human seat segment renders inside the stacked bar");
   assert.equal(humansSwatch.getAttribute("title"), null);
   assert.ok(humansSwatch.hasAttribute("data-base-ui-tooltip-trigger"), "seat breakdown hint now rides the RUI tooltip trigger");
-  const agentsSwatch = seatProgress.querySelector(".bg-accent-400");
+  const agentsSwatch = seatProgress.querySelector(".bg-accent-strong");
   assert.ok(agentsSwatch, "agent seat segment renders inside the stacked bar");
   assert.equal(agentsSwatch.getAttribute("title"), null);
   assert.ok(agentsSwatch.hasAttribute("data-base-ui-tooltip-trigger"), "seat breakdown hint now rides the RUI tooltip trigger");

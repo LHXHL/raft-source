@@ -115,6 +115,32 @@ export async function resolveProductAnalyticsGate(
 }
 
 /**
+ * The legacy Postgres `product_events` written from client clicks (the
+ * onboarding wizard route) predate this gate and keep the real actor id for
+ * their existing readers (the Daily Brief). They still honor the two explicit
+ * "no"s: a workspace with product analytics off, and a user who turned "Share
+ * usage data" off. TEMPORARY EXCEPTION: a user who has not chosen is still
+ * recorded, with their real id, unlike the gate (not chosen = not sharing).
+ * Once the default is decided (RFC-067 §9.4, cindyz), this path follows it.
+ */
+export async function legacyProductEventsAllowed(
+  db: DatabaseExecutor,
+  input: { userId: string; serverId: ServerId },
+): Promise<boolean> {
+  const [user] = await db
+    .select({ shareUsageData: users.shareUsageData })
+    .from(users)
+    .where(eq(users.id, input.userId))
+    .limit(1);
+  const [server] = await db
+    .select({ enabled: servers.productAnalyticsEnabled })
+    .from(servers)
+    .where(eq(servers.id, input.serverId))
+    .limit(1);
+  return user?.shareUsageData !== false && server?.enabled !== false;
+}
+
+/**
  * Opting out deletes the user's mapping, so everything already recorded under
  * the old analytics id stops belonging to anyone (RFC-067 §3.4). Opting back
  * in mints a fresh random id; the earlier history stays unlinked.

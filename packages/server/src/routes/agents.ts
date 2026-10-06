@@ -123,6 +123,7 @@ import {
   recordAgentProvisioning,
   retryAgentProvisioning,
 } from "../services/agentRuntimeProvisionService";
+import { kickAppNotificationDelivery } from "../services/appNotificationDeliveryService";
 import {
   fetchHostedAgentUsage,
   listHostedAgentWorkspaceFiles,
@@ -208,6 +209,7 @@ import {
 } from "../services/builtinModelCatalogCompatibility";
 import { MachineCatalogStaleError } from "../services/machineCatalogAuthority";
 import { guardUuidPathParams } from "../lib/uuidPathParams";
+import { mapWithConcurrency } from "../lib/mapWithConcurrency";
 
 export const agentRouter: RouterType = Router();
 
@@ -1246,6 +1248,13 @@ async function currentUserCanActOnAgent(
 }
 
 // List all agents in server
+// Activity is resolved per agent and can fall back to Postgres (agent rows,
+// latest persisted activity) when the cache and Redis miss. An unbounded
+// Promise.all over a large server (362 agents, 133 deleted) borrowed 139 pool
+// connections at once on prod (2026-10-06 01:45Z). Bounded until resolution is
+// batched.
+const AGENT_LIST_ACTIVITY_CONCURRENCY = 8;
+
 agentRouter.get("/", async (req, res) => {
   try {
     addTraceEvent("agents.list.started");
@@ -1277,12 +1286,13 @@ agentRouter.get("/", async (req, res) => {
       ? list.filter((agent) => guestVisibleAgentIds.has(agent.id))
       : list;
     if (callerRole === "guest") {
-      const publicProfiles = await Promise.all(scopedList.map(async (agent) => {
+      const publicProfiles = await mapWithConcurrency(scopedList, AGENT_LIST_ACTIVITY_CONCURRENCY, async (agent) => {
         const { activity, activityDetail } = await agentOrchestrator.getActivity(agent.id, {
           parent: getCurrentTraceContext(),
+          persistedAgent: agent,
         });
         return toGuestChannelAgentProfile({ ...agent, activity, activityDetail });
-      }));
+      });
       addTraceEvent("response.ready", {
         agents_count: publicProfiles.length,
         profile_projection: "channel_summary",
@@ -1321,9 +1331,10 @@ agentRouter.get("/", async (req, res) => {
     // batch-enrich creator + createdAgents via one combined DB pass instead
     // of 2N queries. See agentService.batchEnrichAgentsWithCreatorProfile.
     const withActivity = await tracePhase(
-      () => Promise.all(scopedList.map(async (a) => {
+      () => mapWithConcurrency(scopedList, AGENT_LIST_ACTIVITY_CONCURRENCY, async (a) => {
         const { activity, activityDetail, activityDetailKind, deliveryConsumption, wakeCrashLoop } = await agentOrchestrator.getActivity(a.id, {
           parent: getCurrentTraceContext(),
+          persistedAgent: a,
         });
         return {
           ...withServerRoleProjection(withAgentProjection(a), roleByAgent.get(a.id) ?? null),
@@ -1338,7 +1349,7 @@ agentRouter.get("/", async (req, res) => {
             ? { lastSeenAt: lastSeenByAgent.get(a.id)?.toISOString() ?? null }
             : {}),
         };
-      })),
+      }),
       (durationMs, result) => ({
         name: "activities.loaded",
         attrs: {
@@ -1973,6 +1984,8 @@ agentRouter.post("/:id/onboarding-identity-adoption", async (req, res) => {
       res.status(404).json({ error: "Agent not found" });
       return;
     }
+    // Adoption rewrites the name, display name, description and avatar: other open clients must re-read.
+    if (adoption.canAdopt) broadcastAgentUpdated(req, req.serverId!, updated.id);
     const runtimeProfile = await agentRuntimeProfileService.getAgentRuntimeProfileSummary(updated.id);
     const projectedServerRole = await getActorServerRoleInServer(req.serverId!, "agent", updated.id);
     const agent = await agentService.enrichAgentWithCreatorProfile({
@@ -4018,6 +4031,7 @@ agentRouter.delete("/:id", async (req, res) => {
       return beginProvisionedAgentDeletion(tx, req.params.id, req.userId!);
     });
     if (hostedDeletion) kickAgentRuntimeProvisionWorker();
+    kickAppNotificationDelivery();
     agentOrchestrator.evictCache(req.params.id);
     // After commit: the agent's sk_agent_* credentials are now unusable; close
     // its open wake-hint streams on every replica.

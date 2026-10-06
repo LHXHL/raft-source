@@ -3,7 +3,6 @@ import { MemoryRouter, useLocation } from "react-router-dom";
 import { act, cleanup, fireEvent, render as rtlRender, screen, waitFor, within } from "@testing-library/react";
 import api from "../src/api/client";
 import {
-  ARCHIVED_CHANNEL_BADGE_CLASS,
   ARCHIVED_CHANNEL_ICON_CLASS,
   ARCHIVED_CHANNEL_MUTED_TEXT_CLASS,
   ARCHIVED_CHANNEL_TEXT_CLASS,
@@ -291,13 +290,17 @@ test("archived channel search results render with the shared muted visual treatm
     /bg-black\/5/,
     "active channel search result icon should keep the yellow hash treatment",
   );
-  assertElementHasClasses(within(archivedResult).getByText("Archived"), ARCHIVED_CHANNEL_BADGE_CLASS);
+  // Both tags on the archived row are the same rui Badge the active row uses,
+  // not a hand-written span. How they look is measured in a real browser.
+  const activeTypeBadge = activeResult.querySelector('[data-slot="badge"]');
+  const archivedBadges = [...archivedResult.querySelectorAll('[data-slot="badge"]')];
+  assert.ok(activeTypeBadge, "active channel result renders its type tag as a rui Badge");
+  assert.deepEqual(archivedBadges.map((badge) => badge.textContent), ["Channel", "Archived"]);
+  for (const badge of archivedBadges) {
+    assert.equal(badge.className, activeTypeBadge.className, `${badge.textContent} tag matches the active row's Badge`);
+  }
   assertElementHasClasses(
-    within(archivedResult).getAllByText("Channel").find((element) => element.className.includes("uppercase")),
-    ARCHIVED_CHANNEL_BADGE_CLASS,
-  );
-  assertElementHasClasses(
-    within(archivedResult).getAllByText("Channel").find((element) => element.className.includes("text-xs")),
+    within(archivedResult).getAllByText("Channel").find((element) => element.getAttribute("data-slot") !== "badge" && element.className.includes("text-xs")),
     ARCHIVED_CHANNEL_MUTED_TEXT_CLASS,
   );
 });

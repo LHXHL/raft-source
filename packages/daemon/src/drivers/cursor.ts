@@ -1,9 +1,11 @@
 import { spawn } from "node:child_process";
+import { existsSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { clearClockTimeout, CURSOR_MODEL_DETECTION_TIMEOUT_MS, hydrateRuntimeConfig, setClockTimeout, runtimeConfigToLaunchFields, runtimeModelSourceOutcomeFromSet, type AgentConfig, type RuntimeModelInfo, type RuntimeModelSet, type RuntimeModelSourceOutcome , type AxSurfaceText } from "@botiverse/raft-shared";
 import type { RuntimeDriver, SpawnContext, SpawnResult, ParsedEvent } from "./types";
 import { buildCliTransportSystemPrompt, prepareCliTransport } from "./cliTransport";
 import { withWindowsUserEnvironment, type ProbeDeps } from "./probe";
+import { resolveRuntimeLaunch, type DirectLaunch, type WindowsLaunchDeps } from "./windowsLaunch";
 import {
   installManagedMcpRuntimeJsonOverlay,
   prepareManagedMcpRuntimeProxy,
@@ -59,6 +61,66 @@ export function buildCursorArgs(ctx: SpawnContext): string[] {
   return args;
 }
 
+export interface CursorLaunchDeps extends WindowsLaunchDeps {
+  readdirSyncFn?: (dirPath: string) => string[];
+}
+
+const CURSOR_VERSION_DIR = /^(\d{4})\.(\d{1,2})\.(\d{1,2})(?:-(\d{2}-\d{2}-\d{2}))?-[a-f0-9]+$/;
+
+function cursorVersionSortKey(name: string): string | null {
+  const match = CURSOR_VERSION_DIR.exec(name);
+  if (!match) return null;
+  const [, year, month, day, time] = match;
+  return `${year}${month!.padStart(2, "0")}${day!.padStart(2, "0")}${time ?? "00-00-00"}`;
+}
+
+/**
+ * The Windows installer puts `cursor-agent.cmd` next to a `versions` directory;
+ * the wrapper hands off to PowerShell, which runs the newest
+ * `versions\<version>\node.exe versions\<version>\index.js`. Do the same
+ * directly so the argv never passes through cmd.exe or PowerShell.
+ */
+export function resolveCursorWindowsInstallLaunch(
+  shimPath: string,
+  args: string[],
+  deps: CursorLaunchDeps = {},
+): DirectLaunch | null {
+  const winPath = path.win32;
+  const existsSyncFn = deps.existsSyncFn ?? existsSync;
+  const readdirSyncFn = deps.readdirSyncFn ?? ((dirPath: string) => readdirSync(dirPath));
+  const versionsDir = winPath.join(winPath.dirname(shimPath), "versions");
+  let names: string[];
+  try {
+    names = readdirSyncFn(versionsDir);
+  } catch {
+    return null;
+  }
+  const versions = names
+    .map((name) => ({ name, key: cursorVersionSortKey(name) }))
+    .filter((entry): entry is { name: string; key: string } => entry.key !== null)
+    .sort((a, b) => (a.key === b.key ? b.name.localeCompare(a.name) : b.key.localeCompare(a.key)));
+  for (const { name } of versions) {
+    const versionDir = winPath.join(versionsDir, name);
+    const node = winPath.join(versionDir, "node.exe");
+    const entry = winPath.join(versionDir, "index.js");
+    if (!existsSyncFn(node) || !existsSyncFn(entry)) continue;
+    return {
+      command: node,
+      args: [entry, ...args],
+      env: { ...(deps.env ?? process.env), CURSOR_INVOKED_AS: winPath.basename(shimPath) },
+      shell: false,
+    };
+  }
+  return null;
+}
+
+export function resolveCursorLaunch(args: string[], deps: CursorLaunchDeps = {}): DirectLaunch {
+  return resolveRuntimeLaunch("cursor", "cursor-agent", args, {
+    ...deps,
+    resolveBatchLaunch: (shimPath, batchArgs) => resolveCursorWindowsInstallLaunch(shimPath, batchArgs, deps),
+  });
+}
+
 /**
  * Cursor CLI driver.
  *
@@ -109,11 +171,12 @@ export class CursorDriver implements RuntimeDriver {
 
     const spawnEnv = await buildCursorSpawnEnv(ctx);
 
-    const proc = spawn("cursor-agent", args, {
+    const launch = resolveCursorLaunch(args, { env: spawnEnv });
+    const proc = spawn(launch.command, launch.args, {
       cwd: ctx.workingDirectory,
       stdio: ["pipe", "pipe", "pipe"],
-      env: spawnEnv,
-      shell: process.platform === "win32",
+      env: launch.env ?? spawnEnv,
+      shell: false,
     });
 
     return { process: proc };
@@ -291,7 +354,7 @@ export function killCursorProbeTree(pid: number, platform: NodeJS.Platform): voi
 export function runCursorModelsCommandAsync(options: CursorModelsProbeOptions = {}): Promise<CursorModelsCommandResult> {
   const {
     timeoutMs = CURSOR_MODEL_DETECTION_TIMEOUT_MS,
-    command = "cursor-agent",
+    command,
     args = ["models"],
     maxOutputBytes = CURSOR_MODEL_PROBE_MAX_OUTPUT_BYTES,
     platform = process.platform,
@@ -311,8 +374,12 @@ export function runCursorModelsCommandAsync(options: CursorModelsProbeOptions = 
     };
     let child: ReturnType<typeof spawn>;
     try {
-      child = spawn(command, args, {
-        env: buildCursorModelProbeEnv(),
+      const env = buildCursorModelProbeEnv();
+      const launch = command
+        ? { command, args, env: undefined }
+        : resolveCursorLaunch(args, { env, platform });
+      child = spawn(launch.command, launch.args, {
+        env: launch.env ?? env,
         stdio: ["ignore", "pipe", "ignore"],
         detached: platform !== "win32",
         windowsHide: true,

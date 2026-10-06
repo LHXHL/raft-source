@@ -18,6 +18,7 @@ import {
   MessageImageGalleryItem,
   MessageImageGalleryOverlay,
   MessageImageGalleryPreview,
+  MessageImageGalleryRow,
   MessageItem,
   MessageItemAvatarSlot,
   MessageItemBody,
@@ -62,6 +63,7 @@ import {
   TaskStatusIcon,
   ThreadIcon,
   toast,
+  buildMessageImageGalleryRows,
 } from "raft-ui";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize from "rehype-sanitize";
@@ -205,7 +207,6 @@ import { ThreadRepliesBadge } from "./ThreadRepliesBadge";
 import CollapsibleMessageContent from "./CollapsibleMessageContent";
 
 import { formatReminderReceiptContentTitle, formatReminderReceiptTime, formatReminderReceiptTooltip, splitReminderReceiptFireAtTokens } from "../../utils/reminderReceiptTime";
-import { imageGalleryBackgroundClass } from "../../utils/imagePreviewStyles";
 import { resolveMessageSenderMember } from "../../utils/messageSenderMember";
 import { isRaftUploadedHumanAvatarUrl } from "../../utils/humanAvatar";
 import type { TimeFormatOptions } from "../../utils/timeFormatting";
@@ -441,80 +442,6 @@ function ReactionCount({ count }: { count: number }) {
       {count}
     </span>
   );
-}
-
-type MessageImageAttachment = NonNullable<Message["attachments"]>[number];
-type ImageAspectKind = "wide" | "tall" | "normal";
-const SINGLE_IMAGE_MAX_WIDTH = 416;
-const SINGLE_IMAGE_MAX_HEIGHT = 288;
-
-export interface ImageGalleryRow {
-  attachments: MessageImageAttachment[];
-  gridClass: string;
-  heightClass: string;
-}
-
-export function classifyImageAspect(att: Pick<MessageImageAttachment, "width" | "height">): ImageAspectKind {
-  if (!att.width || !att.height || att.width <= 0 || att.height <= 0) return "normal";
-  const ratio = att.width / att.height;
-  if (ratio >= 2.2) return "wide";
-  if (ratio <= 0.55) return "tall";
-  return "normal";
-}
-
-function getImageGalleryRowClasses(attachments: MessageImageAttachment[]): Omit<ImageGalleryRow, "attachments"> {
-  if (attachments.length <= 1) {
-    return { gridClass: "grid-cols-1", heightClass: "h-32 sm:h-36" };
-  }
-  if (attachments.length === 2) {
-    return { gridClass: "grid-cols-2", heightClass: "h-32 sm:h-36" };
-  }
-  return { gridClass: "grid-cols-2 md:grid-cols-3", heightClass: "h-28 sm:h-32" };
-}
-
-export function buildImageGalleryRows(attachments: MessageImageAttachment[]): ImageGalleryRow[] {
-  if (attachments.length <= 1) {
-    return attachments.length === 0 ? [] : [{ attachments, ...getImageGalleryRowClasses(attachments) }];
-  }
-
-  const rows: ImageGalleryRow[] = [];
-  let buffer: MessageImageAttachment[] = [];
-
-  const pushBufferedRows = () => {
-    if (buffer.length === 0) return;
-    const chunkSize = buffer.length === 4 ? 2 : 3;
-    for (let i = 0; i < buffer.length; i += chunkSize) {
-      const rowAttachments = buffer.slice(i, i + chunkSize);
-      rows.push({ attachments: rowAttachments, ...getImageGalleryRowClasses(rowAttachments) });
-    }
-    buffer = [];
-  };
-
-  for (const attachment of attachments) {
-    if (classifyImageAspect(attachment) === "wide") {
-      pushBufferedRows();
-      rows.push({ attachments: [attachment], ...getImageGalleryRowClasses([attachment]) });
-      continue;
-    }
-    buffer.push(attachment);
-  }
-
-  pushBufferedRows();
-  return rows;
-}
-
-function getImageGalleryFitClass(att: MessageImageAttachment): string {
-  return classifyImageAspect(att) === "normal" ? "object-cover" : "object-contain";
-}
-
-function getSingleImageReserveStyle(att: MessageImageAttachment) {
-  if (!att.width || !att.height || att.width <= 0 || att.height <= 0) {
-    return { width: "min(11rem, 100%)", aspectRatio: "4 / 3" };
-  }
-
-  const scale = Math.min(SINGLE_IMAGE_MAX_WIDTH / att.width, SINGLE_IMAGE_MAX_HEIGHT / att.height, 1);
-  const reservedWidth = Math.max(1, Math.round(att.width * scale));
-  return { width: `min(${reservedWidth}px, 100%)`, aspectRatio: `${att.width} / ${att.height}` };
 }
 
 export interface MentionEntry {
@@ -1933,7 +1860,7 @@ function InlineAudioPlayer({
             className="pointer-events-none absolute left-0 right-0 top-1/2 h-2 -translate-y-1/2 border border-line-muted bg-layer-panel peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-black"
             aria-hidden="true"
           >
-            <div className="h-full bg-primary-400 theme-brutal:bg-brutal-cyan" style={{ width: `${progress}%` }} />
+            <div className="h-full bg-primary-strong theme-brutal:bg-brutal-cyan" style={{ width: `${progress}%` }} />
           </div>
           <span
             data-message-affordance="audio-seek-thumb"
@@ -1966,7 +1893,7 @@ function InlineAudioPlayer({
             className="pointer-events-none absolute left-0 right-0 top-1/2 h-1.5 -translate-y-1/2 border border-line-muted bg-layer-panel peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-black"
             aria-hidden="true"
           >
-            <div className="h-full bg-primary-400 theme-brutal:bg-soft-signal" style={{ width: `${volumeProgress}%` }} />
+            <div className="h-full bg-primary-strong theme-brutal:bg-soft-signal" style={{ width: `${volumeProgress}%` }} />
           </div>
           <span
             data-message-affordance="audio-volume-thumb"
@@ -4729,7 +4656,7 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
             const imageAttachments = message.attachments.filter((att) => isPreviewableImageAttachment(att));
             const lightboxImages = imageAttachments.filter((att) => !isOptimisticAttachment(att));
             const renderedImages = imageAttachments.filter((att) => !!getImageGalleryPreviewSrc(att, imageFallbackUrls));
-            const imageRows = buildImageGalleryRows(renderedImages);
+            const imageRows = buildMessageImageGalleryRows(renderedImages);
             const videoAttachments = message.attachments.filter((att) => isPreviewableVideoAttachment(att));
             const audioAttachments = message.attachments.filter((att) => isPreviewableAudioAttachment(att));
             const otherAttachments = message.attachments.filter((att) => {
@@ -4743,11 +4670,12 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
               {imageRows.length > 0 && (
                 <MessageImageGallery>
                   {imageRows.map((row, rowIndex) => (
-                    <div
-                      key={`${row.attachments.map((att) => att.id).join("-")}-${rowIndex}`}
-                      className={`grid gap-2 ${row.gridClass}`}
+                    <MessageImageGalleryRow
+                      key={`${row.items.map((item) => renderedImages[item.index].id).join("-")}-${rowIndex}`}
+                      row={row}
                     >
-                      {row.attachments.map((att) => {
+                      {row.items.map((item) => {
+                        const att = renderedImages[item.index];
                         const previewSrc = getImageGalleryPreviewSrc(att, imageFallbackUrls);
                         if (!previewSrc) return null;
                         const isOptimistic = isOptimisticAttachment(att);
@@ -4767,17 +4695,11 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
                           event.stopPropagation();
                           void handleDownloadAttachment(att);
                         };
-                        const isSingleImage = renderedImages.length === 1;
-                        const fitClass = getImageGalleryFitClass(att);
-                        const imageBackgroundClass = fitClass === "object-contain" ? imageGalleryBackgroundClass : "";
-                        const imageReserveStyle = isSingleImage ? getSingleImageReserveStyle(att) : undefined;
                         return (
                           <Tooltip key={att.id} content={att.filename}>
                           <MessageImageGalleryItem
-                            className={`${
- isSingleImage ? "inline-block w-fit max-w-[26rem] justify-self-start" : row.heightClass
- } bg-brutal-cream/60`}
-                            style={imageReserveStyle}
+                            className="bg-brutal-cream/60"
+                            layout={item}
                           >
                             <img
                               src={previewSrc}
@@ -4785,11 +4707,6 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
                               data-select-screenshot-attachment-id={att.id}
                               data-select-screenshot-attachment-width={att.width ?? undefined}
                               data-select-screenshot-attachment-height={att.height ?? undefined}
-                              className={
- isSingleImage
- ? `block h-full w-full object-contain ${imageGalleryBackgroundClass}`
- : `block h-full w-full ${fitClass} ${imageBackgroundClass}`
- }
                               width={att.width ?? undefined}
                               height={att.height ?? undefined}
                               loading="lazy"
@@ -4819,7 +4736,7 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
                           </Tooltip>
                         );
                       })}
-                    </div>
+                    </MessageImageGalleryRow>
                   ))}
                 </MessageImageGallery>
               )}

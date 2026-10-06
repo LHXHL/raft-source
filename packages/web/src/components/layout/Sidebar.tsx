@@ -889,7 +889,7 @@ const ChannelRow = memo(function ChannelRow({
       {showMentionMarker && (
         <Tooltip content={formatMessage({ id: "layout.sidebar.mentionedYouTitle" })}>
         <span
-          className="ml-1 inline-flex size-4 shrink-0 items-center justify-center rounded border border-line-strong bg-primary text-primary-950 theme-brutal:border-black theme-brutal:bg-soft-signal theme-brutal:text-black"
+          className="ml-1 inline-flex size-4 shrink-0 items-center justify-center rounded border border-line-strong bg-primary-soft text-primary-strong theme-brutal:border-black theme-brutal:bg-soft-signal theme-brutal:text-black"
           data-testid="sidebar-mention-marker"
           aria-label={formatMessage({ id: "layout.sidebar.mentionedYouAria" })}
         >
@@ -3782,7 +3782,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
                      在窄+矮屏（移动 + max-h:600）顶部 server-name 不要卡片，
                      直接文字 + chevron，UI 跟 Members / Settings 一致。
                      Tailwind 修饰符链 strip 掉 tilt / border / bg / shadow / pad。 */
-                  className="mobile-server-selector-vector relative inline-flex shrink-0 items-center border-2 [@media(max-height:600px)]:border-0 border-transparent bg-transparent px-3 [@media(max-height:600px)]:px-0 py-1 [@media(max-height:600px)]:py-0 font-display font-bold text-base text-primary-400 theme-brutal:text-soft-signal"
+                  className="mobile-server-selector-vector relative inline-flex shrink-0 items-center border-2 [@media(max-height:600px)]:border-0 border-transparent bg-transparent px-3 [@media(max-height:600px)]:px-0 py-1 [@media(max-height:600px)]:py-0 font-display font-bold text-base text-primary-strong theme-brutal:text-soft-signal"
                 >
                   <MobileServerSelectorVectorSurface />
                   {hasOtherServerUnread && (

@@ -7,6 +7,7 @@ import {
   writeManagedMcpRuntimeConfigFile,
 } from "../managedMcpRuntimeProxy";
 import { resolveRaftHome } from "../raftHome";
+import { resolveRuntimeLaunch } from "./windowsLaunch";
 
 export async function buildCopilotSpawnEnv(ctx: SpawnContext): Promise<NodeJS.ProcessEnv> {
   return (await prepareCliTransport(ctx, { NO_COLOR: "1" })).spawnEnv;
@@ -113,11 +114,12 @@ export class CopilotDriver implements RuntimeDriver {
 
     const spawnEnv = await buildCopilotSpawnEnv(ctx);
 
-    const proc = spawn("copilot", args, {
+    const launch = resolveRuntimeLaunch("copilot", "copilot", args, { env: spawnEnv });
+    const proc = spawn(launch.command, launch.args, {
       cwd: ctx.workingDirectory,
       stdio: ["pipe", "pipe", "pipe"],
-      env: spawnEnv,
-      shell: process.platform === "win32",
+      env: launch.env ?? spawnEnv,
+      shell: false,
     });
 
     return { process: proc };

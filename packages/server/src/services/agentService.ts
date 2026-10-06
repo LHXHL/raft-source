@@ -12,7 +12,7 @@ import { assertAgentHandleAvailableInServer, lockServerPrincipalHandles, Princip
 import { refreshSubscriptionForServerIfStale } from "./billingService";
 import { evaluateFeatureFlag } from "./featureFlagService";
 import { recordSecondAgentCreatedEvent } from "./productEventsService";
-import { emitAppFacingNotificationEvent } from "./appNotificationDeliveryService";
+import { emitAppFacingMemberEvents, emitAppFacingNotificationEvent, kickAppNotificationDelivery } from "./appNotificationDeliveryService";
 import { assertActionCardWritable, assertActionCardWritableInTransaction } from "./actionCardConversionService";
 import { recordIntegrationAuditEvent } from "./integrationAuditService";
 
@@ -187,11 +187,20 @@ export async function createAgent(
       })
       .returning();
 
-    await tx.insert(serverAgentMembers).values({
+    const [joined] = await tx.insert(serverAgentMembers).values({
       serverId,
       agentId: newAgent.id,
       role: "member",
-    }).onConflictDoNothing();
+    }).onConflictDoNothing().returning({ role: serverAgentMembers.role });
+    if (joined) {
+      // Same commit as the insert: the event row is the outbox.
+      await emitAppFacingMemberEvents({
+        serverId,
+        eventType: "server.member_added",
+        members: [{ principalType: "agent", principalId: newAgent.id, role: joined.role }],
+        provenance: { source: "agent_service", actor_type: opts.creatorType === "agent" ? "agent" : "human", reason: "created" },
+      }, tx);
+    }
 
     if (opts.afterInsert) {
       await opts.afterInsert(tx, newAgent);
@@ -292,6 +301,7 @@ export async function createAgent(
     return newAgent;
   });
 
+  kickAppNotificationDelivery();
   return agent;
 }
 
@@ -852,19 +862,48 @@ export async function invalidateAgentSessionFromSignal(
   });
 }
 
+// A runtime error the agent reports again (crash loop: relaunch, same error)
+// within this window keeps the stored row instead of rewriting it.
+export const AGENT_RUNTIME_ERROR_REWRITE_WINDOW_MS = 5 * 60 * 1000;
+
+/**
+ * Persist the agent's runtime error and return the error state that is now
+ * durable, or null when the agent is gone (deleted / missing).
+ *
+ * The same error (message, errorClass, actionRequired; launchId and at are
+ * ignored) reported again within AGENT_RUNTIME_ERROR_REWRITE_WINDOW_MS of the
+ * stored one's `at` is not rewritten: the stored state is returned instead, so
+ * callers publish exactly what the row holds. Agents in an error loop wrote
+ * the same error on every relaunch (~18 writes/min on prod, 29 agents).
+ */
 export async function setAgentLastRuntimeError(
   agentId: string,
   lastRuntimeError: AgentRuntimeErrorState,
-): Promise<boolean> {
+): Promise<AgentRuntimeErrorState | null> {
   const db = getDb();
+  const stored = agents.lastRuntimeError;
+  const sameRecentError = sql`(
+    ${stored} IS NOT NULL
+    AND ${stored}->>'message' IS NOT DISTINCT FROM ${lastRuntimeError.message}
+    AND ${stored}->>'errorClass' IS NOT DISTINCT FROM ${lastRuntimeError.errorClass ?? null}::text
+    AND (${stored}->>'actionRequired')::boolean IS NOT DISTINCT FROM ${lastRuntimeError.actionRequired}
+    AND (${stored}->>'at')::timestamptz > ${lastRuntimeError.at}::timestamptz - make_interval(secs => ${AGENT_RUNTIME_ERROR_REWRITE_WINDOW_MS / 1000})
+  )`;
   const [updated] = await db.update(agents)
     .set({
       lastRuntimeError,
       updatedAt: new Date(),
     })
-    .where(and(eq(agents.id, agentId), isNull(agents.deletedAt)))
+    .where(and(eq(agents.id, agentId), isNull(agents.deletedAt), sql`NOT ${sameRecentError}`))
     .returning({ id: agents.id });
-  return Boolean(updated);
+  if (updated) return lastRuntimeError;
+
+  // Not written: either the agent is gone, or the same error is already stored.
+  const [current] = await db.select({ lastRuntimeError: agents.lastRuntimeError })
+    .from(agents)
+    .where(and(eq(agents.id, agentId), isNull(agents.deletedAt)))
+    .limit(1);
+  return current?.lastRuntimeError ?? null;
 }
 
 export async function clearAgentLastRuntimeError(agentId: string): Promise<boolean> {
@@ -1115,8 +1154,20 @@ export async function deleteAgent(agentId: string, options: { executor?: Databas
     await tx.delete(agentRuntimeProfiles)
       .where(eq(agentRuntimeProfiles.agentId, agentId));
 
-    await tx.delete(serverAgentMembers)
-      .where(eq(serverAgentMembers.agentId, agentId));
+    const removedMemberships = await tx.delete(serverAgentMembers)
+      .where(eq(serverAgentMembers.agentId, agentId))
+      .returning({ serverId: serverAgentMembers.serverId, role: serverAgentMembers.role });
+    // Same commit as the delete: the event row is the outbox. The caller
+    // kicks app delivery after its own commit.
+    for (const membership of removedMemberships) {
+      await emitAppFacingMemberEvents({
+        serverId: membership.serverId,
+        eventType: "server.member_removed",
+        members: [{ principalType: "agent", principalId: agentId, role: membership.role }],
+        occurredAt: deletedAt,
+        provenance: { source: "agent_service", actor_type: "human", reason: "removed" },
+      }, tx);
+    }
 
     // A deleted Agent can never launch again, so its provider connection
     // assignment is dead weight. Keeping the row would leave the connection

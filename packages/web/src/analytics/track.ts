@@ -15,7 +15,6 @@
 import type { ProductEventName, ProductEventProperties } from "@botiverse/raft-shared";
 import { assertValidDesktopRuntimeEnvironment, hasDesktopBridge, RUNTIME_API_BASE } from "../desktopRuntimeEnvironment";
 import { WEB_APP_VERSION } from "../utils/webAppVersion";
-import { getWebTabId } from "../utils/webAuthTrace";
 
 const FLUSH_DELAY_MS = 10_000;
 const MAX_BATCH_EVENTS = 100;
@@ -34,6 +33,11 @@ interface QueuedEvent {
 }
 
 type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
+
+// This tab's product-analytics session: random per page load and deliberately
+// NOT the trace tabId, so product events cannot be joined to traces (which
+// carry a stable per-user id) and re-linked after the user stops sharing.
+const productSessionId: string = crypto.randomUUID();
 
 let queue: QueuedEvent[] = [];
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -65,7 +69,7 @@ export function trackEvent<E extends ProductEventName>(
       uuid: crypto.randomUUID(),
       event,
       timestamp: new Date().toISOString(),
-      client_session_id: getWebTabId(),
+      client_session_id: productSessionId,
       properties,
     },
   });

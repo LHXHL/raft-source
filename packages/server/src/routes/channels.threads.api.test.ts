@@ -37,14 +37,26 @@ const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardi
 
 /**
  * The v3 stats tests below mock the pool's query (the v3 read). The active list
- * reads rw_followed_threads_v4 first (through queryRisingWave's pool.connect);
+ * reads rw_followed_threads_v5 first (through queryRisingWave's pool.connect);
  * stub that read with NO rows, so every followed thread is "missing in v4"
  * (CDC lag) and takes the legacy regular query plus the v3 stats read under test.
  */
-function stubFollowedThreadsV4WithNoRows(): void {
+// The v4 row read fails, so the request takes the whole legacy path, whose
+// stats read is the RisingWave stats backend these tests exercise. (A thread
+// merely missing from v4 is left out, not served by the legacy read.)
+function stubFollowedThreadsV5Unavailable(): void {
   __testRisingWaveInbox.set({
     query: (async (_pool: unknown, queryText: string) => {
-      assert.match(queryText, /FROM rw_followed_threads_v4 v/, "only the v4 read goes through queryRisingWave here");
+      assert.match(queryText, /FROM rw_followed_threads_v5 v/, "only the v5 read goes through queryRisingWave here");
+      throw new Error('relation "rw_followed_threads_v5" does not exist');
+    }) as never,
+  });
+}
+
+function stubFollowedThreadsV5WithNoRows(): void {
+  __testRisingWaveInbox.set({
+    query: (async (_pool: unknown, queryText: string) => {
+      assert.match(queryText, /FROM rw_followed_threads_v5 v/, "only the v5 read goes through queryRisingWave here");
       return { result: { rows: [] }, acquireWaitMs: 0, poolState: { rw_pool_total: 0, rw_pool_idle: 0, rw_pool_waiting: 0 } };
     }) as never,
   });
@@ -344,17 +356,16 @@ test("GET /api/channels/threads/followed records followed-thread phases and quer
     "http.response.finished",
   ]);
   const sourceSelected = span.events.find((event) => event.name === "followed_threads.source_selected");
-  assert.equal(sourceSelected?.attrs?.followed_threads_source, "rw_v4");
+  assert.equal(sourceSelected?.attrs?.followed_threads_source, "rw_v5");
   assert.equal(sourceSelected?.attrs?.rw_regular_threads, 1);
   assert.equal(sourceSelected?.attrs?.rw_missing_threads, 0);
 
-  // Active follows of a member: the rw_followed_threads_v4 path. Its query set
+  // Active follows of a member: the rw_followed_threads_v5 path. Its query set
   // is constant in the number of threads (primary-key / distinct-parent reads).
   const dbEvents = span.events.filter((event) => event.name === "db.query.finished");
   assert.deepEqual(
     dbEvents.map((event) => event.attrs?.query_name).sort(),
     [
-      "channels.followed_joint_threads_by_user",
       "channels.followed_thread_ids_by_user",
       "channels.followed_threads.parent_channels",
       "channels.followed_threads.read_cursors",
@@ -362,12 +373,12 @@ test("GET /api/channels/threads/followed records followed-thread phases and quer
       "channels.followed_threads_rw_rows",
     ],
   );
-  assert.equal(dbEvents.length, 6, "followed threads query count should stay constant for task-claimant enrichment");
+  assert.equal(dbEvents.length, 5, "followed threads query count should stay constant for task-claimant enrichment");
 
   const dbEventByQuery = new Map(dbEvents.map((event) => [event.attrs?.query_name, event]));
   assert.equal(dbEventByQuery.get("channels.followed_thread_ids_by_user")?.attrs?.phase, "followed_threads.loaded");
   assert.equal(dbEventByQuery.get("channels.followed_thread_ids_by_user")?.attrs?.followed_threads_count, 1);
-  // No RisingWave in CI: the installed test reference serves the v4 rows from Postgres.
+  // No RisingWave in CI: the installed test reference serves the v5 rows from Postgres.
   assert.equal(dbEventByQuery.get("channels.followed_threads_rw_rows")?.attrs?.rows_count, 1);
   assert.equal(dbEventByQuery.get("channels.followed_threads.parent_channels")?.attrs?.parent_channels_count, 1);
   assert.equal(dbEventByQuery.get("channels.followed_threads.read_cursors")?.attrs?.read_cursor_rows_count, 1);
@@ -408,7 +419,7 @@ test("GET /api/channels/threads/followed uses RW stats by default when configure
     process.env.RISINGWAVE_DATABASE_URL = "postgres://127.0.0.1:4566/slock_rw_default_on_test";
     // Exercise the RisingWave read itself: take the test reference away.
     uninstallRisingWaveReadReferences();
-    stubFollowedThreadsV4WithNoRows();
+    stubFollowedThreadsV5Unavailable();
     const rwQueries: unknown[][] = [];
     let rwRows: unknown[] = [];
     (pg.Pool.prototype as unknown as { query: (...args: unknown[]) => Promise<{ rows: unknown[] }> }).query = async (...args: unknown[]) => {
@@ -480,7 +491,7 @@ test("GET /api/channels/threads/followed uses RW stats by default when configure
     assert.equal(successEvent.attrs?.stats_source, "rw_mv");
     assert.equal(successEvent.attrs?.fallback_reason, "none");
     assert.equal(successEvent.attrs?.backend, "risingwave");
-    assert.equal(successEvent.attrs?.rw_followed_thread_stats_view, "rw_followed_threads_v4");
+    assert.equal(successEvent.attrs?.rw_followed_thread_stats_view, "rw_followed_threads_v5");
     assert.equal(successEvent.attrs?.followed_threads_count, 1);
     assert.equal(successEvent.attrs?.stats_rows_count, 1);
 
@@ -500,6 +511,199 @@ test("GET /api/channels/threads/followed uses RW stats by default when configure
   }
 });
 
+
+
+test("GET /api/channels/threads/followed reads v4 stats while rw_followed_threads_v5 is not built (074 transition)", async ({ app }) => {
+
+  const previousRisingWaveDatabaseUrl = process.env.RISINGWAVE_DATABASE_URL;
+  const originalPoolQuery = pg.Pool.prototype.query;
+  try {
+    const sink = new MemoryTraceSink();
+    const tracer = new BasicTracer({
+      sink,
+      traceIdGenerator: () => "7".repeat(32),
+      spanIdGenerator: (() => {
+        let next = 1;
+        return () => String(next++).padStart(16, "0");
+      })(),
+    });
+    app.app.set("serverTracer", tracer);
+
+    process.env.RISINGWAVE_DATABASE_URL = "postgres://127.0.0.1:4566/slock_rw_default_on_test";
+    // Exercise the RisingWave read itself: take the test reference away.
+    uninstallRisingWaveReadReferences();
+    stubFollowedThreadsV5Unavailable();
+    const rwQueries: unknown[][] = [];
+    let rwRows: unknown[] = [];
+    const missingV5Queries: unknown[][] = [];
+    (pg.Pool.prototype as unknown as { query: (...args: unknown[]) => Promise<{ rows: unknown[] }> }).query = async (...args: unknown[]) => {
+      if (/JOIN rw_followed_threads_v5 s/.test(String(args[0]))) {
+        missingV5Queries.push(args);
+        throw Object.assign(new Error('relation "rw_followed_threads_v5" does not exist'), { code: "42P01" });
+      }
+      rwQueries.push(args);
+      return { rows: rwRows };
+    };
+
+    const db = getDb();
+    const owner = await seedUser("followed-rw-default-owner@slock.test", "followed-rw-default-owner");
+    const replier = await seedUser("followed-rw-default-replier@slock.test", "followed-rw-default-replier");
+    const server = await createServer("Followed RW Default Server", "followed-rw-default-server", owner.id);
+    await addMember(server.id, replier.id);
+    const channel = await createChannel(server.id, "followed-rw-default-channel");
+    await addHuman(channel.id, owner.id);
+    const parentMessage = await createMessage(channel.id, "user", owner.id, "parent task");
+    const thread = await getOrCreateThread(parentMessage.id, owner.id, "user");
+    const unreadReply = await createMessage(thread.id, "user", replier.id, "pg reply that RW replaces");
+    await db.insert(threadFollows).values({
+      threadChannelId: thread.id,
+      followerType: "user",
+      followerId: owner.id,
+      parentMessageId: parentMessage.id,
+      reason: "manual",
+    });
+    rwRows = [{
+      threadChannelId: thread.id,
+      replyCount: 1,
+      lastReplyAt: "2026-06-18 09:00:00.000000+00",
+      lastReplyMessageId: unreadReply.id,
+      lastReplyContent: "rw supplied latest reply",
+      lastReplySenderType: "user",
+      lastReplySenderId: replier.id,
+      firstUnreadMessageId: unreadReply.id,
+      unreadCount: 1,
+    }];
+
+    const ownerToken = await tokenForHuman(owner.email);
+    sink.clear();
+
+    const res = await fetch(`${app.baseUrl}/api/channels/threads/followed`, {
+      headers: headers(ownerToken, server.id),
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json() as { threads: Array<{ threadChannelId: string; unreadCount: number; latestActivityPreview: string | null }> };
+    assert.equal(body.threads.length, 1);
+    assert.equal(body.threads[0]?.threadChannelId, thread.id);
+    assert.equal(body.threads[0]?.unreadCount, 1);
+    assert.equal(body.threads[0]?.latestActivityPreview, "rw supplied latest reply");
+    assert.equal(missingV5Queries.length, 1, "the v5 stats read is tried first");
+    assert.equal(rwQueries.length, 1, "then the same read against v4");
+    assert.match(String(rwQueries[0]?.[0]), /JOIN rw_followed_threads_v4 s/);
+
+    const span = sink.getAllSpans().find((candidate) =>
+      candidate.name === "server.http.request"
+      && candidate.attrs?.route_pattern === "/api/channels/threads/followed",
+    );
+    assert.ok(span, "expected GET /api/channels/threads/followed root span");
+    const fallbackEvent = span.events.find((event) => event.name === "followed_threads.stats_backend.view_fallback");
+    assert.ok(fallbackEvent, "the transition fallback is traced");
+    assert.equal(fallbackEvent.attrs?.missing_view, "rw_followed_threads_v5");
+    assert.equal(fallbackEvent.attrs?.rw_followed_thread_stats_view, "rw_followed_threads_v4");
+  } finally {
+    (pg.Pool.prototype as unknown as { query: typeof originalPoolQuery }).query = originalPoolQuery;
+    if (previousRisingWaveDatabaseUrl === undefined) {
+      delete process.env.RISINGWAVE_DATABASE_URL;
+    } else {
+      process.env.RISINGWAVE_DATABASE_URL = previousRisingWaveDatabaseUrl;
+    }
+    installRisingWaveReadReferences();
+    __testRisingWaveInbox.reset();
+    await closeRisingWavePool();
+    await app.close();
+  }
+});
+
+
+test("GET /api/channels/threads/followed answers 503 + Retry-After when the RisingWave pool is saturated", async ({ app }) => {
+
+  const previousRisingWaveDatabaseUrl = process.env.RISINGWAVE_DATABASE_URL;
+  const originalPoolQuery = pg.Pool.prototype.query;
+  try {
+    const sink = new MemoryTraceSink();
+    const tracer = new BasicTracer({
+      sink,
+      traceIdGenerator: () => "7".repeat(32),
+      spanIdGenerator: (() => {
+        let next = 1;
+        return () => String(next++).padStart(16, "0");
+      })(),
+    });
+    app.app.set("serverTracer", tracer);
+
+    process.env.RISINGWAVE_DATABASE_URL = "postgres://127.0.0.1:4566/slock_rw_default_on_test";
+    // Exercise the RisingWave read itself: take the test reference away.
+    uninstallRisingWaveReadReferences();
+    stubFollowedThreadsV5Unavailable();
+    const rwQueries: unknown[][] = [];
+    let rwRows: unknown[] = [];
+    const missingV5Queries: unknown[][] = [];
+    (pg.Pool.prototype as unknown as { query: (...args: unknown[]) => Promise<{ rows: unknown[] }> }).query = async (...args: unknown[]) => {
+      if (/JOIN rw_followed_threads_v5 s/.test(String(args[0]))) {
+        missingV5Queries.push(args);
+        // pg-pool's error when no RW connection frees up within connectionTimeoutMillis.
+        throw new Error("timeout exceeded when trying to connect");
+      }
+      rwQueries.push(args);
+      return { rows: rwRows };
+    };
+
+    const db = getDb();
+    const owner = await seedUser("followed-rw-default-owner@slock.test", "followed-rw-default-owner");
+    const replier = await seedUser("followed-rw-default-replier@slock.test", "followed-rw-default-replier");
+    const server = await createServer("Followed RW Default Server", "followed-rw-default-server", owner.id);
+    await addMember(server.id, replier.id);
+    const channel = await createChannel(server.id, "followed-rw-default-channel");
+    await addHuman(channel.id, owner.id);
+    const parentMessage = await createMessage(channel.id, "user", owner.id, "parent task");
+    const thread = await getOrCreateThread(parentMessage.id, owner.id, "user");
+    const unreadReply = await createMessage(thread.id, "user", replier.id, "pg reply that RW replaces");
+    await db.insert(threadFollows).values({
+      threadChannelId: thread.id,
+      followerType: "user",
+      followerId: owner.id,
+      parentMessageId: parentMessage.id,
+      reason: "manual",
+    });
+    rwRows = [{
+      threadChannelId: thread.id,
+      replyCount: 1,
+      lastReplyAt: "2026-06-18 09:00:00.000000+00",
+      lastReplyMessageId: unreadReply.id,
+      lastReplyContent: "rw supplied latest reply",
+      lastReplySenderType: "user",
+      lastReplySenderId: replier.id,
+      firstUnreadMessageId: unreadReply.id,
+      unreadCount: 1,
+    }];
+
+    const ownerToken = await tokenForHuman(owner.email);
+    sink.clear();
+
+    const res = await fetch(`${app.baseUrl}/api/channels/threads/followed`, {
+      headers: headers(ownerToken, server.id),
+    });
+    assert.equal(res.status, 503, "a saturated RW pool is a retryable overload, not a 500");
+    assert.equal(res.headers.get("retry-after"), "2");
+    assert.deepEqual(await res.json(), {
+      error: "Temporarily overloaded, retry shortly",
+      code: "rw_overloaded",
+      retryable: true,
+    });
+    assert.equal(missingV5Queries.length, 1);
+    assert.equal(rwQueries.length, 0, "an overload is not retried against v4");
+  } finally {
+    (pg.Pool.prototype as unknown as { query: typeof originalPoolQuery }).query = originalPoolQuery;
+    if (previousRisingWaveDatabaseUrl === undefined) {
+      delete process.env.RISINGWAVE_DATABASE_URL;
+    } else {
+      process.env.RISINGWAVE_DATABASE_URL = previousRisingWaveDatabaseUrl;
+    }
+    installRisingWaveReadReferences();
+    __testRisingWaveInbox.reset();
+    await closeRisingWavePool();
+    await app.close();
+  }
+});
 
 test("GET /api/channels/threads/followed records replay SQL only for slow RW stats queries", async ({ app }) => {
 
@@ -522,7 +726,7 @@ test("GET /api/channels/threads/followed records replay SQL only for slow RW sta
     process.env.RISINGWAVE_DATABASE_URL = "postgres://127.0.0.1:4566/slock_rw_slow_replay_test";
     // Exercise the RisingWave read itself: take the test reference away.
     uninstallRisingWaveReadReferences();
-    stubFollowedThreadsV4WithNoRows();
+    stubFollowedThreadsV5Unavailable();
     process.env.RISINGWAVE_FOLLOWED_THREAD_STATS_SLOW_REPLAY_TRACE_MS = "1";
     process.env.RISINGWAVE_FOLLOWED_THREAD_STATS_REPLAY_THREAD_CAP = "100";
     const rwQueries: unknown[][] = [];
@@ -583,7 +787,7 @@ test("GET /api/channels/threads/followed records replay SQL only for slow RW sta
     assert.equal(slowReplayEvent.attrs?.fallback_reason, "none");
     assert.equal(slowReplayEvent.attrs?.backend, "risingwave");
     assert.equal(slowReplayEvent.attrs?.query_name, "channels.followed_threads_stats_by_threads");
-    assert.equal(slowReplayEvent.attrs?.rw_followed_thread_stats_view, "rw_followed_threads_v4");
+    assert.equal(slowReplayEvent.attrs?.rw_followed_thread_stats_view, "rw_followed_threads_v5");
     assert.equal(slowReplayEvent.attrs?.followed_threads_count, 1);
     assert.equal(slowReplayEvent.attrs?.stats_rows_count, 1);
     assert.equal(slowReplayEvent.attrs?.slow_threshold_ms, 1);
@@ -607,7 +811,7 @@ test("GET /api/channels/threads/followed records replay SQL only for slow RW sta
     assert.deepEqual(JSON.parse(replayParamsJson), [server.id, owner.id, thread.id]);
     assert.match(replaySql, /WITH input_threads\(thread_channel_id\)/);
     assert.match(replaySql, /VALUES \(\$3::varchar\)/);
-    assert.match(replaySql, /JOIN rw_followed_threads_v4 s/);
+    assert.match(replaySql, /JOIN rw_followed_threads_v5 s/);
     assert.equal(replaySql.includes("postgres://127.0.0.1:4566"), false);
     assert.equal(replayParamsJson.includes("postgres://127.0.0.1:4566"), false);
     assert.equal(replaySql.includes("rw supplied latest reply"), false);
@@ -658,7 +862,7 @@ test("GET /api/channels/threads/followed truncates over-cap slow RW replay paylo
     process.env.RISINGWAVE_DATABASE_URL = "postgres://127.0.0.1:4566/slock_rw_slow_replay_cap_test";
     // Exercise the RisingWave read itself: take the test reference away.
     uninstallRisingWaveReadReferences();
-    stubFollowedThreadsV4WithNoRows();
+    stubFollowedThreadsV5Unavailable();
     process.env.RISINGWAVE_FOLLOWED_THREAD_STATS_SLOW_REPLAY_TRACE_MS = "1";
     process.env.RISINGWAVE_FOLLOWED_THREAD_STATS_REPLAY_THREAD_CAP = "0";
     const rwQueries: unknown[][] = [];
@@ -751,7 +955,7 @@ test("GET /api/channels/threads/followed truncates over-cap slow RW replay paylo
 });
 
 
-test("GET /api/channels/threads/followed lists a thread without stats (no error, no Postgres fallback) when RW lags behind CDC", async ({ app }) => {
+test("GET /api/channels/threads/followed leaves out a thread RW has not caught up with (no error, no Postgres fill-in)", async ({ app }) => {
 
   const previousRisingWaveDatabaseUrl = process.env.RISINGWAVE_DATABASE_URL;
   const originalPoolQuery = pg.Pool.prototype.query;
@@ -770,7 +974,7 @@ test("GET /api/channels/threads/followed lists a thread without stats (no error,
     process.env.RISINGWAVE_DATABASE_URL = "postgres://127.0.0.1:4566/slock_rw_missing_rows_test";
     // Exercise the RisingWave read itself: take the test reference away.
     uninstallRisingWaveReadReferences();
-    stubFollowedThreadsV4WithNoRows();
+    stubFollowedThreadsV5WithNoRows();
     const rwQueries: unknown[][] = [];
     (pg.Pool.prototype as unknown as { query: (...args: unknown[]) => Promise<{ rows: unknown[] }> }).query = async (...args: unknown[]) => {
       rwQueries.push(args);
@@ -808,19 +1012,14 @@ test("GET /api/channels/threads/followed lists a thread without stats (no error,
     const res = await fetch(`${app.baseUrl}/api/channels/threads/followed`, {
       headers: headers(ownerToken, server.id),
     });
-    assert.equal(res.status, 200, "a lagging RW stats read is served as-is, never an error or a Postgres reroute");
-    assert.equal(rwQueries.length, 1);
+    assert.equal(res.status, 200, "a lagging RW read is served as-is, never an error or a Postgres reroute");
+    assert.equal(rwQueries.length, 0, "nothing listed, so no stats read");
     const body = await res.json() as { threads: Array<Record<string, unknown>> };
-    const listed = body.threads.find((candidate) => candidate.threadChannelId === thread.id);
-    assert.ok(listed, "the thread without an RW stats row is still listed");
-    // No stats row yet: it renders from the parent message with zero stats.
-    assert.equal(listed.replyCount, 0);
-    assert.equal(listed.unreadCount, 0);
-    assert.equal(listed.lastReplyAt, null);
-    assert.equal(listed.firstUnreadMessageId, null);
-    assert.equal(listed.latestActivityMessageId, parentMessage.id);
-    assert.equal(listed.latestActivitySeq, String(parentMessage.seq));
-    assert.equal(listed.parentMessageId, parentMessage.id);
+    assert.equal(
+      body.threads.find((candidate) => candidate.threadChannelId === thread.id),
+      undefined,
+      "a followed thread not in rw_followed_threads_v5 yet (CDC lag) is left out until RW catches up",
+    );
 
     const span = sink.getAllSpans().find((candidate) =>
       candidate.name === "server.http.request"
@@ -828,27 +1027,15 @@ test("GET /api/channels/threads/followed lists a thread without stats (no error,
     );
     assert.ok(span, "expected GET /api/channels/threads/followed root span");
 
-    // Not in rw_followed_threads_v4 either: served by the legacy regular query
-    // restricted to it, with v3 stats (which lag too).
+    // Counted in the trace, not filled in from Postgres.
     const sourceSelected = span.events.find((event) => event.name === "followed_threads.source_selected");
-    assert.equal(sourceSelected?.attrs?.followed_threads_source, "rw_v4");
+    assert.equal(sourceSelected?.attrs?.followed_threads_source, "rw_v5");
     assert.equal(sourceSelected?.attrs?.rw_missing_threads, 1);
-    assert.equal(sourceSelected?.attrs?.legacy_regular_threads, 1);
-
-    const rowMismatchEvent = span.events.find((event) => event.name === "followed_threads.stats_backend.row_mismatch");
-    assert.ok(rowMismatchEvent, "expected RW row mismatch (CDC lag) trace event");
-    assert.equal(rowMismatchEvent.attrs?.stats_source, "rw_mv");
-    assert.equal(rowMismatchEvent.attrs?.fallback_reason, "none");
-    assert.equal(rowMismatchEvent.attrs?.followed_threads_count, 1);
-    assert.equal(rowMismatchEvent.attrs?.stats_rows_count, 0);
-    assert.equal(rowMismatchEvent.attrs?.missing_stats_rows_count, 1);
-
-    const statsEvents = span.events.filter((event) =>
-      event.name === "db.query.finished"
-      && event.attrs?.query_name === "channels.followed_threads_stats_by_threads"
-    );
-    assert.equal(statsEvents.length, 1, "only the RW stats query runs; there is no Postgres fallback query");
-    assert.equal(statsEvents[0].attrs?.stats_source, "rw_mv");
+    const queryNames = span.events
+      .filter((event) => event.name === "db.query.finished")
+      .map((event) => event.attrs?.query_name);
+    assert.ok(!queryNames.includes("channels.followed_threads_by_user"), "no Postgres regular-thread list for the missing thread");
+    assert.ok(!queryNames.includes("channels.followed_threads_stats_by_threads"), "no stats read for threads that are not listed");
   } finally {
     (pg.Pool.prototype as unknown as { query: typeof originalPoolQuery }).query = originalPoolQuery;
     if (previousRisingWaveDatabaseUrl === undefined) {

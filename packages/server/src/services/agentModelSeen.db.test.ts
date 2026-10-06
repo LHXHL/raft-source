@@ -65,3 +65,16 @@ dbTest("agent:model-seen does not move the read position over rows newer than th
   assert.deepEqual(result, { outcome: "unchanged", reason: "gap" }, "a lower seq could still be committing behind a fresh row");
   assert.equal(await getAgentLegacyReadCursor(agent.id, channel.id), 0);
 });
+
+dbTest("agent:model-seen ignores a conversation on another server, even a public one", async ({ seed }) => {
+  const owner = await seed.human();
+  const server = await seed.server({ owner });
+  const otherServer = await seed.server({ owner });
+  const foreign = await seed.channel({ server: otherServer, members: [owner] });
+  const agent = await createAgent(server.id, "cross-server-agent", { runtime: "codex", creatorType: "user", creatorId: owner.id });
+  const message = await createMessage(foreign.id, "user", owner.id, "public, but on another server");
+
+  const result = await applyAgentModelSeen({ agentId: agent.id, serverId: server.id, channelId: foreign.id, seqs: [message.seq] }, settledNow);
+  assert.deepEqual(result, { outcome: "unchanged", reason: "no_access" });
+  assert.equal(await getAgentLegacyReadCursor(agent.id, foreign.id), 0);
+});

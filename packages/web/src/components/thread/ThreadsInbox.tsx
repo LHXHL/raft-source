@@ -238,7 +238,7 @@ function highlightActivitySearchText(value: string, query: string): ReactNode {
     if (index > cursor) parts.push(value.slice(cursor, index));
     const match = value.slice(index, index + needle.length);
     parts.push(
-      <mark key={`${index}-${match}`} className="bg-primary px-0.5 text-primary-950 theme-brutal:bg-soft-signal theme-brutal:text-black">
+      <mark key={`${index}-${match}`} className="bg-primary-soft px-0.5 text-primary-strong theme-brutal:bg-soft-signal theme-brutal:text-black">
         {match}
       </mark>,
     );
@@ -280,7 +280,7 @@ function ActivityGroupIcon({ group, dmChannel }: { group: InboxGroupCount; dmCha
   const isDm = group.channelType === "dm";
   return (
     <span
-      className={`flex size-5 shrink-0 items-center justify-center border border-line-muted theme-brutal:border-2 theme-brutal:border-black/20 ${isDm ? "bg-primary text-primary-950 theme-brutal:bg-soft-signal theme-brutal:text-black" : "bg-fill-muted"}`}
+      className={`flex size-5 shrink-0 items-center justify-center border border-line-muted theme-brutal:border-2 theme-brutal:border-black/20 ${isDm ? "bg-primary-soft text-primary-strong theme-brutal:bg-soft-signal theme-brutal:text-black" : "bg-fill-muted"}`}
       data-testid={isDm ? `activity-group-dm-fallback-${group.channelId}` : `activity-group-channel-icon-${group.channelId}`}
     >
       {isDm ? <DirectMessageIcon width={12} height={12} /> : <Hash size={12} />}
@@ -1575,7 +1575,7 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
                     <button
                       key={entry.value}
                       type="button"
-                      className={`h-8 shrink-0 border px-2 text-xs font-bold theme-brutal:border-2 ${activityView === entry.value ? "border-line-strong bg-primary shadow-raft-sm text-primary-950 theme-brutal:border-black theme-brutal:bg-soft-signal theme-brutal:text-black theme-brutal:shadow-brutal-sm" : "border-line-muted bg-layer-panel theme-brutal:border-black/20 theme-brutal:bg-white"}`}
+                      className={`h-8 shrink-0 border px-2 text-xs font-bold theme-brutal:border-2 ${activityView === entry.value ? "border-line-strong bg-primary-soft shadow-raft-sm text-primary-strong theme-brutal:border-black theme-brutal:bg-soft-signal theme-brutal:text-black theme-brutal:shadow-brutal-sm" : "border-line-muted bg-layer-panel theme-brutal:border-black/20 theme-brutal:bg-white"}`}
                       onClick={() => setSidebarView(entry.value)}
                       data-testid={`inbox-filter-${entry.value}`}
                     >

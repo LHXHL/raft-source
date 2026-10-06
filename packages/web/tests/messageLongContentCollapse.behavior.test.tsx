@@ -15,6 +15,7 @@ import {
 } from "../src/components/message/MessageTimeline";
 import { expandClonedMessageContentForScreenshot } from "../src/utils/selectScreenshot";
 import { TestIntlProvider } from "./helpers/intl";
+import { installForwardFoldMeasurementStub } from "./helpers/forwardFoldMeasurement";
 import type { Locale } from "../src/i18n/locale";
 import type { User } from "../src/store/authStore";
 import type { Channel } from "../src/store/channelStore";
@@ -26,6 +27,7 @@ import {
 } from "../src/store/serverFeatureFlags";
 
 let renderedContentHeight = 0;
+let restoreForwardFoldMeasurement: (() => void) | null = null;
 let scrollHeightReadCount = 0;
 let originalScrollHeightDescriptor: PropertyDescriptor | undefined;
 let originalResizeObserver: typeof ResizeObserver | undefined;
@@ -229,6 +231,8 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  restoreForwardFoldMeasurement?.();
+  restoreForwardFoldMeasurement = null;
   __resetMessageContentCollapseStateForTests();
   if (originalResizeObserver) {
     globalThis.ResizeObserver = originalResizeObserver;
@@ -693,6 +697,9 @@ test("action cards stay fully interactive instead of entering message collapse",
 });
 
 test("forwarded bundles keep only their card-level disclosure instead of nesting message collapse", async () => {
+  // The card's own fold measures rendered heights; jsdom reports zero, so the
+  // stub gives the item body the tall box a real browser would.
+  restoreForwardFoldMeasurement = installForwardFoldMeasurementStub();
   renderedContentHeight = 640;
   await renderMessage("forwarded-message", {
     actionMetadata: {

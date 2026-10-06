@@ -21,6 +21,7 @@ import { type AxSurfaceText,
   providerRequestId,
   type TrajectoryEntry,
   type Tracer,
+  MODEL_SEEN_MAX_ITEMS_PER_REPORT,
 } from "@botiverse/raft-shared";
 import { AgentProcessManager, DecisionErrorWindow, resolveRuntimeSessionRef, type RuntimeProcessGate } from "./agentProcessManager";
 import { OUTBOX_NORMAL_CAP, RuntimeOutcomeOutbox, nodeOutboxFs } from "./runtimeOutcomeOutbox";
@@ -61,6 +62,7 @@ import {
 import { DAEMON_CORE_TRACE_ATTR_CONTRACTS } from "./core";
 import { FakeClock, waitForExactCount } from "./testing/drydock";
 import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
+import { releaseAgentManagerForTests } from "./testing/agentManagerTeardown";
 
 const testDir = path.dirname(fileURLToPath(import.meta.url));
 
@@ -1214,34 +1216,10 @@ async function withManager(fn: (ctx: {
   try {
     await fn({ driver, sent, manager, dataDir });
   } finally {
-    setSessionReadyDeliveryRetrySchedulerFactoryForTesting(null);
-    cleanupTestManager(manager);
+    await releaseAgentManagerForTests(manager);
     restoreFetch();
     await rm(dataDir, { recursive: true, force: true });
   }
-}
-
-function cleanupTestManager(manager: AgentProcessManager): void {
-  if ((manager as any).agentStartPumpTimer) clearTimeout((manager as any).agentStartPumpTimer);
-  for (const timer of (manager as any).runtimeErrorProcessRestartTimers?.values?.() ?? []) {
-    clearTimeout(timer);
-  }
-  (manager as any).runtimeErrorProcessRestartTimers?.clear?.();
-  for (const ap of (manager as any).agents?.values?.() ?? []) {
-    ap.notifications.clearTimer();
-    if (ap.sessionReadyDeliveryRetry?.kind === "scheduled") {
-      ap.sessionReadyDeliveryRetry.scheduler.clearTimer();
-    }
-    if (ap.pendingTrajectory?.timer) clearTimeout(ap.pendingTrajectory.timer);
-    if (ap.activityHeartbeat?.kind === "active") clearInterval(ap.activityHeartbeat.timer);
-    if (ap.startup?.kind === "waiting" && ap.startup.timer) clearTimeout(ap.startup.timer);
-    if (ap.exit?.kind === "live" && ap.exit.stalledRecoverySigtermTimer) clearTimeout(ap.exit.stalledRecoverySigtermTimer);
-    if (ap.compaction?.kind === "active" && ap.compaction.watchdog) clearTimeout(ap.compaction.watchdog);
-    if (ap.runtimeErrorDeliveryBackoff?.kind === "backing_off" && ap.runtimeErrorDeliveryBackoff.timer) {
-      clearTimeout(ap.runtimeErrorDeliveryBackoff.timer);
-    }
-  }
-  (manager as any).agents?.clear?.();
 }
 
 test("runtime binding rejects dual-server crossed stdin with zero foreign-child bytes", async () => {
@@ -6973,7 +6951,7 @@ test("stdin runtimes start a new turn after turn_end instead of steering the nex
     assert.equal(driver.encodedCalls[0].mode, "idle");
     assertContentFreeInboxUpdatePrompt(driver.encodedCalls[0].text, "queued while busy");
   } finally {
-    cleanupTestManager(manager);
+    await releaseAgentManagerForTests(manager);
     await rm(dataDir, { recursive: true, force: true });
   }
 });
@@ -7005,7 +6983,7 @@ test("stdin runtimes batch multiple queued messages into the next turn", async (
     assert.equal(driver.encodedCalls[0].mode, "idle");
     assertContentFreeInboxUpdatePrompt(driver.encodedCalls[0].text, ["first follow-up", "second follow-up"]);
   } finally {
-    cleanupTestManager(manager);
+    await releaseAgentManagerForTests(manager);
     await rm(dataDir, { recursive: true, force: true });
   }
 });
@@ -10037,7 +10015,9 @@ test("codex repeated same-fingerprint provider stream failures fence idle restar
   await withManager(async ({ manager, sent }) => {
     await manager.startAgent("agent-1", makeConfig({ sessionId: "session-1" }), undefined, undefined, undefined, "launch-1");
 
-    const emitStreamErrorAndClose = async (processIndex: number) => {
+    // Exit handling continues past one macrotask (it awaits internally); under
+    // load one flush() is not enough. Wait for the state the exit settles in.
+    const emitStreamErrorAndClose = async (processIndex: number, settled: () => boolean, label: string) => {
       const line = `stream-error-${processIndex}`;
       driver.parsedLines.set(line, [
         { kind: "error", message: "stream closed before response.completed" },
@@ -10047,10 +10027,12 @@ test("codex repeated same-fingerprint provider stream failures fence idle restar
         driver.processes[processIndex].exit(1);
         driver.processes[processIndex].close(1);
       }
-      await flush();
+      await waitFor(settled, label);
     };
+    const restartCached = () => Boolean((manager as any).lifecycleRecords.idleRestartSnapshots.get("agent-1"));
+    const fenced = () => Boolean((manager as any).lifecycleRecords.terminalFailures.get("agent-1"));
 
-    await emitStreamErrorAndClose(0);
+    await emitStreamErrorAndClose(0, restartCached, "first failure settles with an idle restart");
     assert.ok((manager as any).lifecycleRecords.idleRestartSnapshots.get("agent-1"), "first same-fingerprint failure should stay wakeable");
     manager.deliverMessage("agent-1", makeMessage("retry after first provider stream failure"));
     await waitFor(
@@ -10059,7 +10041,7 @@ test("codex repeated same-fingerprint provider stream failures fence idle restar
     );
     assert.equal(driver.spawnCalls.length, 2);
 
-    await emitStreamErrorAndClose(1);
+    await emitStreamErrorAndClose(1, restartCached, "second failure settles with an idle restart");
     assert.ok((manager as any).lifecycleRecords.idleRestartSnapshots.get("agent-1"), "second same-fingerprint failure should still stay wakeable");
     manager.deliverMessage("agent-1", makeMessage("retry after second provider stream failure"));
     await waitFor(
@@ -10068,7 +10050,7 @@ test("codex repeated same-fingerprint provider stream failures fence idle restar
     );
     assert.equal(driver.spawnCalls.length, 3);
 
-    await emitStreamErrorAndClose(2);
+    await emitStreamErrorAndClose(2, fenced, "third failure settles fenced");
 
     assert.equal((manager as any).agents.has("agent-1"), false);
     assert.equal((manager as any).lifecycleRecords.idleRestartSnapshots.has("agent-1"), false, "fenced same-fingerprint failure must not cache another idle restart");
@@ -10082,7 +10064,7 @@ test("codex repeated same-fingerprint provider stream failures fence idle restar
     assert.match(errorEvent.detail, /Runtime stopped after 3 repeated runtime errors with the same fingerprint/);
 
     manager.deliverMessage("agent-1", makeMessage("retry after fenced provider stream failure"));
-    await flush();
+    await waitFor(() => (manager as any).startingInboxes.values("agent-1")?.length === 3, "fenced retry is kept pending");
 
     assert.equal(driver.spawnCalls.length, 3, "fenced same-fingerprint failure should not respawn on the next message");
     const queued = (manager as any).startingInboxes.values("agent-1");
@@ -10218,7 +10200,7 @@ test("missing Claude resume session falls back to a cold start", async () => {
 
     await manager.stopAgent("agent-1");
   } finally {
-    cleanupTestManager(manager);
+    await releaseAgentManagerForTests(manager);
     restoreFetch();
     await rm(dataDir, { recursive: true, force: true });
   }
@@ -12611,6 +12593,23 @@ test("model-seen: catch-up bodies shown at startup are reported on the first mod
     const [report] = reports as Array<Extract<MachineToServerMessage, { type: "agent:model-seen" }>>;
     assert.equal(report.launchId, "launch-1");
     assert.deepEqual(report.items, [{ channelId: resume[0].channel_id, seqs: [11, 12] }]);
+  }, { driver });
+});
+
+test("model-seen: a report covering more conversations than the Server applies per message is split", async () => {
+  const driver = new FakeCodexDriver({ id: "pi", supportsStdinNotification: true, busyDeliveryMode: "direct" });
+  const conversations = MODEL_SEEN_MAX_ITEMS_PER_REPORT + 3;
+  const resume = Array.from({ length: conversations }, (_, index) =>
+    makeMessage(`owed ${index}`, { message_id: `m${index}`, seq: 100 + index, channel_id: `channel-${index}` }));
+  await withManager(async ({ manager, sent }) => {
+    await serverStart(manager, "agent-1", makeConfig({ runtime: "pi", sessionId: "session-1" }), "launch-1", { resumeMessages: resume });
+    await flush();
+    emitRuntimeLines(driver, 0, "turn-1", [{ kind: "text", text: "on it" }, { kind: "turn_end", sessionId: "session-1" }]);
+    await flush();
+
+    const reports = sent.filter((msg) => msg.type === "agent:model-seen") as Array<Extract<MachineToServerMessage, { type: "agent:model-seen" }>>;
+    assert.deepEqual(reports.map((report) => report.items.length), [MODEL_SEEN_MAX_ITEMS_PER_REPORT, 3]);
+    assert.equal(new Set(reports.flatMap((report) => report.items.map((item) => item.channelId))).size, conversations);
   }, { driver });
 });
 

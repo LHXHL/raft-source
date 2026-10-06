@@ -116,7 +116,9 @@ test("selected theme cards use their own visual personality", () => {
   assert.ok(elegantPreview?.firstElementChild?.classList.contains("shadow-raft-xs"), "elegant inner mock must have shadow-raft-xs");
 
   fireEvent.click(elegantRadio);
-  assert.match(elegantCard.className, /border-primary-400/);
+  // The selected elegant card reads the accent pair (task #623): accent-strong
+  // in elegant, soft-signal kept under brutal via the theme-brutal override.
+  assert.match(elegantCard.className, /border-accent-strong/);
   assert.match(elegantCard.className, /shadow-none/);
   assert.match(brutalCard.className, /shadow-none/);
   assert.doesNotMatch(brutalCard.className, /border-line-strong/);

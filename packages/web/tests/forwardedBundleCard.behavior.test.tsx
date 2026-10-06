@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { resetAttachmentPreviewSummaryCache } from "../src/components/message/attachmentPreviewSummaryCache";
 import { resetInlineAttachmentUrlCache } from "../src/components/message/inlineAttachmentUrlCache";
-import { readFileSync } from "node:fs";
 import "./helpers/domSetup";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { TestIntlProvider } from "./helpers/intl";
@@ -45,9 +44,10 @@ function metadata(): ForwardedBundleMetadata {
   };
 }
 
-test("Forward image strip loads destination projection previews, scrolls after three columns, and updates occlusion shadow cues", async () => {
-  // The strip resolves every tile in ONE batch request now: per-attachment GETs
-  // scaled with images rather than messages and tripped the download limiter.
+test("Forwarded images render as message-gallery rows and open their attachment", async () => {
+  // The gallery resolves every tile in ONE batch request now: per-attachment
+  // GETs scaled with images rather than messages and tripped the download
+  // limiter.
   const batched: string[][] = [];
   api.post = (async (url: string, body: { attachmentIds: string[] }) => {
     assert.equal(url, "/attachments/urls");
@@ -73,26 +73,22 @@ test("Forward image strip loads destination projection previews, scrolls after t
   assert.deepEqual([...batched[0]!].sort(), ["image-1", "image-2", "image-3", "image-4"]);
   assert.ok(screen.getByTestId("forwarded-bundle-file-chips").textContent?.includes("notes.txt"));
 
-  const scroller = screen.getByTestId("forwarded-bundle-image-scroller");
-  Object.defineProperty(scroller, "clientWidth", { configurable: true, value: 300 });
-  Object.defineProperty(scroller, "scrollWidth", { configurable: true, value: 400 });
-  Object.defineProperty(scroller, "scrollLeft", { configurable: true, writable: true, value: 0 });
-  fireEvent.scroll(scroller);
-  assert.equal(screen.queryByTestId("forwarded-bundle-image-shadow-left"), null);
-  const rightShadow = screen.getByTestId("forwarded-bundle-image-shadow-right");
-  assert.match(rightShadow.className, /\bshadow-overflow-cue-right\b/);
-  assert.doesNotMatch(rightShadow.className, /\bshadow-brutal/);
-  assert.doesNotMatch(rightShadow.className, /gradient|from-white|to-transparent/);
-
-  scroller.scrollLeft = 50;
-  fireEvent.scroll(scroller);
-  assert.match(screen.getByTestId("forwarded-bundle-image-shadow-left").className, /\bshadow-overflow-cue-left\b/);
-  assert.ok(screen.getByTestId("forwarded-bundle-image-shadow-right"));
-
-  scroller.scrollLeft = 100;
-  fireEvent.scroll(scroller);
-  assert.ok(screen.getByTestId("forwarded-bundle-image-shadow-left"));
+  // The old three-up strip (and its scroll container and occlusion cues) is
+  // gone: the images lay out as message-gallery rows — a lone buffer of four
+  // splits two-and-two — and the element itself is the shared gallery root.
+  assert.equal(screen.queryByTestId("forwarded-bundle-image-scroller"), null);
   assert.equal(screen.queryByTestId("forwarded-bundle-image-shadow-right"), null);
+  const gallery = screen.getByTestId("forwarded-bundle-image-gallery");
+  assert.equal(gallery.getAttribute("data-slot"), "message-image-gallery");
+  const rows = gallery.querySelectorAll('[data-slot="message-forwarded-bundle-gallery-row"]');
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0]?.children.length, 2);
+  assert.equal(rows[1]?.children.length, 2);
+  const tiles = gallery.querySelectorAll('[data-testid="forwarded-bundle-image"]');
+  assert.equal(tiles.length, 4);
+  for (const tile of tiles) {
+    assert.equal(tile.getAttribute("data-slot"), "message-image-gallery-item");
+  }
 
   fireEvent.click(screen.getByRole("button", { name: "Open two.png" }));
   assert.deepEqual(opened, ["image-2"]);
@@ -167,7 +163,8 @@ test("Forwarded bundle content wraps long unbroken text inside the card", () => 
   const content = screen.getByTestId("forwarded-bundle-content");
   assert.match(content.className, /\bmin-w-0\b/);
   assert.match(content.className, /\bmax-w-full\b/);
-  assert.match(content.className, /\bbreak-words\b/);
+  // The item-content slot ships the canonical wrap class from raft-ui.
+  assert.match(content.className, /\bwrap-break-word\b/);
   assert.doesNotMatch(content.className, /overflow-wrap/);
 });
 
@@ -182,13 +179,4 @@ test("Forward composer can expand its preview card to the full pane width", () =
   assert.match(card.className, /\bw-full\b/);
   assert.match(card.className, /\bmax-w-none\b/);
   assert.doesNotMatch(card.className, /max-w-\[min\(34rem,100%\)\]/);
-});
-
-test("Forward overflow cues keep contrast against both light and dark images", () => {
-  const css = readFileSync(new URL("../src/index.css", import.meta.url), "utf8");
-  for (const direction of ["left", "right"]) {
-    const token = css.match(new RegExp(`--shadow-overflow-cue-${direction}:[\\s\\S]*?;`))?.[0] ?? "";
-    assert.match(token, /rgb\(255 255 255 \/ 92%\)/, `${direction} cue needs a light edge for dark images`);
-    assert.match(token, /rgb\(20 17 17 \/ 60%\)/, `${direction} cue needs a dark edge for light images`);
-  }
 });

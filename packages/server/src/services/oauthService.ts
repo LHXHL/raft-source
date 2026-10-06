@@ -4024,11 +4024,12 @@ export async function markThirdPartyAgentEventsDelivered(
   return updated.length;
 }
 
-export async function rebuildPendingThirdPartyAgentEventMessages(input: {
+/** Third-party events an agent has not acknowledged yet and that have not expired. Read-only. */
+async function selectPendingThirdPartyAgentEvents(input: {
   agentId: string;
   excludeEventIds?: string[];
   limit?: number;
-}): Promise<AgentMessage[]> {
+}) {
   const db = getDbForService();
   const now = new Date();
   const excludeIds = [...new Set(input.excludeEventIds?.filter(Boolean) ?? [])];
@@ -4044,7 +4045,7 @@ export async function rebuildPendingThirdPartyAgentEventMessages(input: {
     whereClauses.push(not(inArray(thirdPartyAgentEvents.id, excludeIds)));
   }
 
-  const rows = await db.select({
+  return db.select({
     event: thirdPartyAgentEvents,
     clientKey: oauthClients.clientId,
     clientName: oauthClients.name,
@@ -4054,7 +4055,32 @@ export async function rebuildPendingThirdPartyAgentEventMessages(input: {
     .where(and(...whereClauses))
     .orderBy(asc(thirdPartyAgentEvents.createdAt), asc(thirdPartyAgentEvents.id))
     .limit(input.limit ?? 100);
+}
 
+/**
+ * The pending third-party events as inbox messages, without claiming them:
+ * the inbox push sweep announces what is still unacknowledged, and announcing
+ * must not change delivery state.
+ */
+export async function listPendingThirdPartyAgentEventMessages(input: {
+  agentId: string;
+  limit?: number;
+}): Promise<AgentMessage[]> {
+  const rows = await selectPendingThirdPartyAgentEvents(input);
+  return rows.map((row) => buildThirdPartyAgentMessage({
+    event: row.event,
+    clientKey: row.clientKey,
+    clientName: row.clientName,
+  }));
+}
+
+export async function rebuildPendingThirdPartyAgentEventMessages(input: {
+  agentId: string;
+  excludeEventIds?: string[];
+  limit?: number;
+}): Promise<AgentMessage[]> {
+  const db = getDbForService();
+  const rows = await selectPendingThirdPartyAgentEvents(input);
   if (rows.length === 0) return [];
   const ids = rows.map((row) => row.event.id);
   await db.update(thirdPartyAgentEvents)

@@ -91,9 +91,6 @@ import {
   SENDER_MENTION_INSERT_EVENT,
 } from "./senderMentionInsert";
 import {
-  ARCHIVED_CHANNEL_BADGE_CLASS,
-} from "../channel/channelArchiveVisual";
-import {
   COMPOSER_RESOURCE_REFERENCES_FEATURE_FLAG_KEY,
   formatRaftRefTarget,
   structuredRaftMentionStillAppears,
@@ -1013,8 +1010,13 @@ export default function MessageInput({
   // active sessions owned by this member and expose cancellation; without the
   // original File object it is unsafe to pretend that a browser can resume
   // the PUT, so the UI deliberately offers no fake "continue" action.
+  // With `resolveChannelId`, `channelId` is only a draft key: the channel is
+  // created on first send (e.g. a thread that has no replies yet). Upload
+  // sessions are bound to a real channel, so there is nothing to recover until
+  // it exists — the same contract attachment uploads already follow.
+  const channelExists = !resolveChannelId;
   const refreshRecoverableUploads = useCallback(() => {
-    if (!preservePendingDraftFiles) return;
+    if (!preservePendingDraftFiles || !channelExists) return;
     const generation = recoverableRefreshGenerationRef.current + 1;
     recoverableRefreshGenerationRef.current = generation;
     recoverableRefreshControllerRef.current?.abort();
@@ -1038,7 +1040,7 @@ export default function MessageInput({
           setRecoverableUploads([]);
         }
       });
-  }, [channelId, preservePendingDraftFiles]);
+  }, [channelExists, channelId, preservePendingDraftFiles]);
 
   useEffect(() => {
     if (!preservePendingDraftFiles || !secondaryLoadsReady) return;
@@ -2501,7 +2503,7 @@ export default function MessageInput({
         <div
           aria-hidden
           data-testid="composer-drop-overlay"
-          className="absolute inset-0 z-30 flex items-center justify-center border-2 border-dashed border-accent-400 bg-accent-soft/50 theme-brutal:border-brutal-pink theme-brutal:bg-brutal-pink/15"
+          className="absolute inset-0 z-30 flex items-center justify-center border-2 border-dashed border-accent-strong bg-accent-soft/50 theme-brutal:border-brutal-pink theme-brutal:bg-brutal-pink/15"
         >
           <span className="rounded-md border border-line-strong bg-layer-panel px-3 py-1.5 text-sm font-bold text-foreground-strong shadow-raft-sm theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:text-black theme-brutal:shadow-brutal-sm">
             {formatMessage({ id: "message.composer.dropToAttach" })}
@@ -2901,9 +2903,9 @@ export default function MessageInput({
                       )}
                       {isArchived && (
                         <ComposerSuggestionAside>
-                          <span className={ARCHIVED_CHANNEL_BADGE_CLASS}>
+                          <Badge appearance="soft" variant="muted" uppercase>
                             {formatMessage({ id: "message.composer.archivedBadge" })}
-                          </span>
+                          </Badge>
                         </ComposerSuggestionAside>
                       )}
                     </ComposerSuggestionContent>

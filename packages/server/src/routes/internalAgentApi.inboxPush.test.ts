@@ -15,7 +15,10 @@ import { createApiTest } from "../test/integration/apiTest";
 //      re-enables; the sweep re-announces unread a notice never reached, and
 //      reminds once per pending state of unread still pending once the last
 //      notice is stale;
-//   5. `/events?ack=cursor` acknowledges on the next request's `since`.
+//   5. `/events?ack=cursor` acknowledges on the next request's `since`;
+//   6. a third-party app event (no durable row) is announced as its own
+//      `agent-event:<id8>` target, once per event, never after it expires, by
+//      the direct push and, when that notice was lost, by the sweep.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createHmac, randomUUID } from "node:crypto";
@@ -25,7 +28,8 @@ import { eq } from "drizzle-orm";
 
 import { getDb } from "../db/index";
 import { traceAgentIdHash, traceServerIdHash } from "../tracing/traceIdentity";
-import { agentInboxPushRegistrations, users } from "../db/schema";
+import { agentInboxPushRegistrations, servers, thirdPartyAgentEvents, users } from "../db/schema";
+import { createOAuthClient, requestAgentAccess } from "../services/oauthService";
 import { createServer } from "../services/serverService";
 import { createAgent } from "../services/agentService";
 import { addAgent, addHuman, createChannel, getAgentLegacyReadCursor, type AgentInboxChainSelection } from "../services/channelService";
@@ -43,11 +47,13 @@ import {
   AGENT_INBOX_NOTICE_POST_TIMEOUT_MS,
   AGENT_INBOX_NOTICE_REMIND_AFTER_MS,
   AGENT_INBOX_PUSH_BAD_REQUEST_RETRY_DELAYS_MS,
+  AgentInboxPendingNotice,
+  agentInboxPushRetryDelayMs,
   startAgentInboxPushWorker,
   sweepAgentInboxNotices,
   type AgentInboxNotice,
 } from "../services/agentInboxPushService";
-import type { WebhookPost } from "../services/appNotificationDeliveryService";
+import { WebhookPostError, type WebhookPost } from "../services/appNotificationDeliveryService";
 import { referenceAgentInboxChain } from "../test/agentInboxChainReference";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
@@ -744,3 +750,185 @@ test("production wiring: server.ts starts the push worker with the server tracer
   const serverSource = readFileSync(new URL("../server.ts", import.meta.url), "utf8");
   assert.match(serverSource, /startAgentInboxPushWorker\(\{\s*agentOrchestrator,\s*tracer: serverTracer\.tracer\s*\}\)/);
 });
+
+/** An app on the agent's Server with an agent token allowed to write notifications to it. */
+async function appWithAgentToken(app: { baseUrl: string }, f: Fixture) {
+  const suffix = randomUUID().slice(0, 8);
+  const { client, clientSecret } = await createOAuthClient({
+    serverId: f.serverId,
+    createdByUserId: f.ownerId,
+    clientId: `push-app-${suffix}`,
+    name: "Push Reminder App",
+    returnUrl: "https://reminder.example.test/callback",
+    allowedScopes: ["openid", "profile", "agent:notification:write"],
+  });
+  const [server] = await getDb().select({ slug: servers.slug }).from(servers).where(eq(servers.id, f.serverId));
+  const { request } = await requestAgentAccess({
+    clientId: client.id,
+    serverSlug: server!.slug,
+    agentId: f.agentId,
+    scopes: ["openid", "profile", "agent:notification:write"],
+  });
+  const response = await fetch(`${app.baseUrl}/api/oauth/token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      clientId: client.clientId,
+      clientSecret,
+      grantType: "urn:slock:grant-type:agent_request",
+      requestId: request.id,
+      resource: `urn:raft:server:${f.serverId}:agent-inbound`,
+    }),
+  });
+  assert.equal(response.status, 200, await response.clone().text());
+  return { client, accessToken: (await response.json() as { access_token: string }).access_token };
+}
+
+async function insertAppEvent(f: Fixture, clientId: string, expiresAt: Date) {
+  const [event] = await getDb().insert(thirdPartyAgentEvents).values({
+    serverId: f.serverId,
+    agentId: f.agentId,
+    clientId,
+    kind: "notification",
+    summary: "Reminder: stand-up",
+    payload: {},
+    payloadHash: "hash",
+    resource: "test",
+    expiresAt,
+  }).returning();
+  return event!;
+}
+
+test("app event: an external agent woken by nothing else gets exactly one notice, addressed agent-event:<id8>", async ({ app }) => {
+  const f = await seedAgent();
+  await register(app, f);
+  const orchestrator = freshProcess(app);
+  const { accessToken } = await appWithAgentToken(app, f);
+  const rec = recorder([{ status: 200 }]);
+  let eventId = "";
+  await withWorker(orchestrator, rec.post, async (worker) => {
+    const write = await fetch(`${app.baseUrl}/api/oauth/agent-events`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ kind: "notification", summary: "Reminder: stand-up in 5 minutes" }),
+    });
+    assert.equal(write.status, 202, await write.clone().text());
+    eventId = (await write.json() as { id: string }).id;
+    await waitFor(() => rec.posted.length === 1);
+    await worker.idle();
+  });
+
+  const notice = rec.posted[0]!.notice;
+  assert.deepEqual(notice.targets, [{
+    target: `agent-event:${eventId.slice(0, 8)}`,
+    pendingCount: 1,
+    firstPendingMsgId: eventId,
+    latestMsgId: eventId,
+    latestSenderName: notice.targets[0]!.latestSenderName,
+    latestSenderType: "third_party_app",
+    flags: [],
+  }]);
+  assert.match(notice.text, new RegExp(`agent-event:${eventId.slice(0, 8)}`));
+  assert.ok(!rec.posted[0]!.body.includes("stand-up in 5 minutes"), "no event body in the notice");
+
+  // The sweep sees the event still unacknowledged, but it was announced.
+  const swept = await sweepAgentInboxNotices({ agentOrchestrator: orchestrator, post: rec.post, agentIds: [f.agentId] });
+  assert.equal(swept.sent, 0);
+  assert.equal(rec.posted.length, 1, "exactly one notice for one event");
+});
+
+test("app event: the sweep announces an event whose notice was lost, once, and never an expired one", async ({ app }) => {
+  const f = await seedAgent();
+  await register(app, f);
+  const orchestrator = freshProcess(app);
+  const { client } = await appWithAgentToken(app, f);
+  await insertAppEvent(f, client.id, new Date(Date.now() - 1_000));
+  const live = await insertAppEvent(f, client.id, new Date(Date.now() + 60 * 60_000));
+  const rec = recorder([{ status: 200 }]);
+
+  const first = await sweepAgentInboxNotices({ agentOrchestrator: orchestrator, post: rec.post, agentIds: [f.agentId] });
+  assert.equal(first.sent, 1);
+  assert.deepEqual(rec.posted[0]!.notice.targets.map((target) => target.target), [`agent-event:${live.id.slice(0, 8)}`]);
+
+  const again = await sweepAgentInboxNotices({ agentOrchestrator: orchestrator, post: rec.post, agentIds: [f.agentId] });
+  assert.equal(again.sent, 0, "announced already");
+  const [row] = await getDb().select({ status: thirdPartyAgentEvents.status }).from(thirdPartyAgentEvents)
+    .where(eq(thirdPartyAgentEvents.id, live.id));
+  assert.equal(row?.status, "queued", "announcing never claims the event");
+});
+
+test("app event: one event is one row however often it is added, and an expired one drops out", () => {
+  const message = (id: string, expiresAt: Date) => ({
+    channel_id: "third-party-agent-events:agent",
+    channel_name: "third-party-agent-events:agent",
+    channel_type: "dm",
+    sender_name: "reminder-app",
+    sender_type: "third_party_app",
+    message_id: id,
+    timestamp: new Date().toISOString(),
+    content: "",
+    third_party_event: { id, kind: "notification", client_id: "reminder-app", client_name: "Reminder", external_event_id: null, payload_hash: "h", payload: {}, expires_at: expiresAt.toISOString(), source: {} },
+  }) as unknown as AgentMessage;
+  const live = "aaaaaaaa-0000-4000-8000-000000000001";
+  const expiring = "bbbbbbbb-0000-4000-8000-000000000002";
+  const pending = new AgentInboxPendingNotice();
+  pending.addMessage(message(live, new Date(Date.now() + 60_000)));
+  pending.addMessage(message(live, new Date(Date.now() + 60_000)));
+  const other = new AgentInboxPendingNotice();
+  other.addMessage(message(live, new Date(Date.now() + 60_000)));
+  other.addMessage(message(expiring, new Date(Date.now() + 1_000)));
+  pending.absorb(other);
+  assert.deepEqual([...pending.rows.values()].map((row) => [row.target, row.pendingCount]).sort(), [
+    ["agent-event:aaaaaaaa", 1],
+    ["agent-event:bbbbbbbb", 1],
+  ]);
+  pending.dropExpired(Date.now() + 2_000);
+  assert.deepEqual([...pending.rows.keys()], ["agent-event:aaaaaaaa"]);
+});
+
+test("backoff: transient failures retry at 5s, 15s, 1m, then every 5 minutes", () => {
+  assert.deepEqual([1, 2, 3, 4, 5, 6, 20].map((failures) => agentInboxPushRetryDelayMs(failures)), [
+    5_000, 15_000, 60_000, 5 * 60_000, 5 * 60_000, 5 * 60_000, 5 * 60_000,
+  ]);
+});
+
+test("a response timeout keeps the connect and TLS timings and records its phase; lastError stays timeout", async ({ app }) => {
+  const f = await seedAgent();
+  await register(app, f);
+  const orchestrator = freshProcess(app);
+  const m1 = await sendHumanMessage(f, "receiver accepts the connection and never answers");
+  const silent: WebhookPost = async () => {
+    throw new WebhookPostError(new Error("Webhook request timed out"), { dnsMs: 4, connectMs: 31, tlsMs: 88, socketReused: false }, "response");
+  };
+  const sink = new MemoryTraceSink();
+  await withWorker(orchestrator, silent, async () => {
+    orchestrator.emit("external-inbox-delivered", f.agentId, delivered(f, m1));
+    await waitForRow(f.agentId, (r) => r.consecutiveFailures === 1);
+  }, { tracer: new BasicTracer({ sink }) });
+  assert.equal((await registrationRow(f.agentId)).lastError, "timeout", "an existing lastError value, unchanged");
+  const span = sink.getAllSpans().find((candidate) => candidate.name === "server.agent_push.notice");
+  assert.equal(span?.attrs?.error_code, "timeout");
+  assert.equal(span?.attrs?.["push.timeout_phase"], "response");
+  assert.equal(span?.attrs?.["push.connect_ms"], 31);
+  assert.equal(span?.attrs?.["push.tls_ms"], 88);
+  assert.equal(span?.attrs?.["push.ttfb_ms"], null);
+});
+
+for (const [retryAfter, expectedMs] of [["30", 30_000], ["3600", 5 * 60_000]] as const) {
+  test(`503 with Retry-After ${retryAfter}s retries after ${expectedMs / 1000}s (capped at 5 minutes)`, async ({ app }) => {
+    const f = await seedAgent();
+    await register(app, f);
+    const orchestrator = freshProcess(app);
+    const m1 = await sendHumanMessage(f, "receiver asks to come back later");
+    const rec = recorder([{ status: 503, retryAfter }]);
+    const before = Date.now();
+    let row: Awaited<ReturnType<typeof registrationRow>> | undefined;
+    await withWorker(orchestrator, rec.post, async () => {
+      orchestrator.emit("external-inbox-delivered", f.agentId, delivered(f, m1));
+      row = await waitForRow(f.agentId, (r) => r.consecutiveFailures === 1);
+    });
+    assert.equal(row!.lastError, "http_503");
+    const waitMs = row!.nextAttemptAt.getTime() - before;
+    assert.ok(waitMs >= expectedMs - 1_000 && waitMs <= expectedMs + 5_000, `next attempt in ${waitMs} ms`);
+  });
+}

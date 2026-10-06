@@ -61,7 +61,7 @@ import {
 import type { Task } from "../../store/taskStore";
 import { useLocation, useNavigate } from "react-router-dom";
 import { buildMessagePermalink, useAppNavigate, useMobileBack } from "../../hooks/useAppNavigate";
-import { transitionThreadToParentMessage } from "../layout/rightPanelUrlSync";
+import { openThreadParentMessageRoute } from "../layout/rightPanelUrlSync";
 import { useTranslationBatch } from "../../hooks/useTranslationBatch";
 import { useChannelMembers } from "../../hooks/useChannelMembers";
 import { buildMessageContextRequest, buildThreadParentContextRequest } from "./messageContextRequest";
@@ -835,7 +835,7 @@ function AuthenticatedThreadPanel({
   const members = useServerStore((s) => s.members);
   const mentionScopeChannelId = parentChannelId || threadChannelId || "";
   const { channelAgents: mentionChannelAgents, channelHumans: mentionChannelHumans } = useChannelMembers(mentionScopeChannelId);
-  const mobileNavigate = useNavigate();
+  const routeNavigate = useNavigate();
   const location = useLocation();
   const currentServer = useServerStore((s) => s.current);
   const normalizedMessageV2Enabled = useServerFeatureFlag(
@@ -2327,25 +2327,20 @@ function AuthenticatedThreadPanel({
       return;
     }
     const routeKind = parentRouteKind === "dm" ? "dm" : "channel";
-    if (!isDesktop) {
-      // View-in-channel replaces the current thread detail surface. The one
-      // earlier PUSH belongs to the origin→Thread transition, so the channel's
-      // Back returns straight to Activity/Search instead of reopening Thread.
-      // Reserve the canonical ?msg= URL before navigating, then clear the
-      // store. BrowserRouter commits route state in a transition; the explicit
-      // ownership marker prevents an already-queued origin effect from racing
-      // stale thread params back into the store before that commit lands.
-      const base = serverSlug ? `/s/${serverSlug}` : "";
-      transitionThreadToParentMessage({
-        pathname: `${base}/${routeKind}/${parentChannelId}`,
-        parentMessageId,
-        navigate: mobileNavigate,
-      });
-    } else if (routeKind === "dm") {
-      nav.toDmMessage(parentChannelId, parentMessageId);
-    } else {
-      nav.toMessage(parentChannelId, parentMessageId);
-    }
+    // Reserve the canonical ?msg= URL before navigating, then clear the store
+    // synchronously. BrowserRouter commits route state in a transition; the
+    // ownership marker prevents an already-queued origin effect from racing
+    // stale thread params back into the store before that commit lands.
+    // Desktop preserves its existing PUSH semantics, while mobile replaces the
+    // current thread detail entry and records the synchronous mobile-back step.
+    openThreadParentMessageRoute({
+      isDesktop,
+      parentRouteKind: routeKind,
+      parentChannelId,
+      parentMessageId,
+      serverSlug,
+      navigate: routeNavigate,
+    });
   };
   // Thread commands live in the menu; structural Back and Close stay in the header.
   const openParentChannelLabel = onOpenParentChannel

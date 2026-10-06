@@ -47,5 +47,5 @@
     "../services/slackBridgeProvisioningControlPlane.ts",
     "../services/slackBridgeServerRuntime.ts"
   ],
-  "fingerprint": "9beee9330b8970fc39c23b413211f659db4328d635772d5f3331abeaa192f694"
+  "fingerprint": "6c60579856a9ff8bc5d5fc1c961deded14322e6098e1461eac1196a1d00a25fb"
 }

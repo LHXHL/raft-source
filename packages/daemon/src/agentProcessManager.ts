@@ -54,6 +54,7 @@ import {
   type FeedbackTranscriptLookupMethod,
   type FeedbackTranscriptLookupReason,
   type FeedbackTranscriptUploadableContentKind,
+  MODEL_SEEN_MAX_ITEMS_PER_REPORT,
 } from "@botiverse/raft-shared";
 import { appInboxItemTraceAttrs } from "@botiverse/raft-shared/src/appRuntimeTrace";
 import { getActiveTraceContext, runWithActiveSpan, runWithoutActiveSpan, withCanonicalTraceAttributes } from "@botiverse/raft-trace-client";
@@ -401,6 +402,16 @@ export interface RuntimeProcessGate {
   waitForCapability(): CapabilityWait;
 }
 
+/** The typed "executable not resolvable" failure with a known reason, anywhere in the cause chain. */
+function launchUnresolvedCause(error: unknown): (RuntimeExecutableNotFoundError & { reason: string }) | null {
+  for (let current = error, depth = 0; current && depth < 5; current = (current as { cause?: unknown }).cause, depth += 1) {
+    if (current instanceof RuntimeExecutableNotFoundError && current.reason) {
+      return current as RuntimeExecutableNotFoundError & { reason: string };
+    }
+  }
+  return null;
+}
+
 export class RuntimeSessionStartError extends Error {
   readonly spawnFailureCode: SpawnFailureReason | null;
 
@@ -546,7 +557,7 @@ function runtimeTier(runtime: string): string {
 export { resolveRuntimeSessionRef };
 export type { ResolveRuntimeSessionRefOptions };
 export { classifySpawnFailure } from "./spawnFailureClassification";
-import { spawnFailureCodeOf, type SpawnFailureReason } from "./spawnFailureErrors";
+import { RuntimeExecutableNotFoundError, spawnFailureCodeOf, type SpawnFailureReason } from "./spawnFailureErrors";
 export type { SpawnFailureClassification, SpawnFailureReason } from "./spawnFailureClassification";
 
 /** Max chars for thinking/text content in trajectory entries (sent over WebSocket) */
@@ -3844,6 +3855,17 @@ export class AgentProcessManager {
       ));
       spawnSpan.end("ok");
     } catch (err) {
+      const unresolved = launchUnresolvedCause(err);
+      if (unresolved) {
+        // Path-free: how many launches the no-cmd.exe Windows resolution turns away, and why.
+        this.recordDaemonEvent("daemon.agent.launch_unresolved", {
+          agentId,
+          launchId,
+          runtime: config.runtime,
+          reason: unresolved.reason,
+          platform: process.platform,
+        }, "error", formatTraceparent(spawnSpan.context));
+      }
       spawnSpan.end("error", { attrs: { error_class: errorClassOf(err) } });
       throw err;
     }
@@ -8666,7 +8688,14 @@ export class AgentProcessManager {
       byChannel.set(message.channel_id, seqs);
     }
     const items = [...byChannel].map(([channelId, seqs]) => ({ channelId, seqs: [...seqs].sort((a, b) => a - b) }));
-    this.sendToServer({ type: "agent:model-seen", agentId, launchId: ap.launchId || undefined, items });
+    for (let start = 0; start < items.length; start += MODEL_SEEN_MAX_ITEMS_PER_REPORT) {
+      this.sendToServer({
+        type: "agent:model-seen",
+        agentId,
+        launchId: ap.launchId || undefined,
+        items: items.slice(start, start + MODEL_SEEN_MAX_ITEMS_PER_REPORT),
+      });
+    }
     this.recordDaemonEvent("daemon.agent.model_seen.reported", {
       agentId,
       launchId: ap.launchId || undefined,

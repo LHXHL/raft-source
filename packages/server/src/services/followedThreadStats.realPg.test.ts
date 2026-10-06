@@ -47,12 +47,12 @@ function quoteIdentifier(identifier: string): string {
   return `"${identifier}"`;
 }
 
-// Minimal rw_followed_threads_v4 carrier (072): the columns the production
+// Minimal rw_followed_threads_v5 carrier (074): the columns the production
 // reads select/join, both the active-path read (RISINGWAVE_FOLLOWED_THREADS_ROWS_SQL)
 // and the stats replay read the legacy path uses. A plain PG table standing in
 // for the RisingWave materialized view; the production query paths are unchanged.
-const RW_V4_CARRIER_DDL = `
-  CREATE TABLE rw_followed_threads_v4 (
+const RW_V5_CARRIER_DDL = `
+  CREATE TABLE rw_followed_threads_v5 (
     server_id varchar NOT NULL,
     user_id varchar NOT NULL,
     thread_channel_id varchar NOT NULL,
@@ -78,12 +78,14 @@ const RW_V4_CARRIER_DDL = `
     task_number int,
     task_status varchar,
     task_claimed_by_type varchar,
-    task_claimed_by_id varchar
+    task_claimed_by_id varchar,
+    joint_projection boolean,
+    joint_parent_channel_id varchar
   )
 `;
 
 test(
-  "production getFollowedThreads reads latestActivitySeq byte-exact from a real PG rw_followed_threads_v4 carrier",
+  "production getFollowedThreads reads latestActivitySeq byte-exact from a real PG rw_followed_threads_v5 carrier",
   {
     skip: !(REAL_PG_URL || REAL_PG_REQUIRED),
   },
@@ -177,22 +179,22 @@ test(
       carrier = new pg.Client({ connectionString: carrierUrl });
       await carrier.connect();
       const latestMessageId = randomUUID();
-      await carrier.query(RW_V4_CARRIER_DDL);
-      const v4Insert = `INSERT INTO rw_followed_threads_v4 (
+      await carrier.query(RW_V5_CARRIER_DDL);
+      const v5Insert = `INSERT INTO rw_followed_threads_v5 (
           server_id, user_id, thread_channel_id, storage_thread_channel_id,
           reply_count, unread_count, latest_seq, latest_message_id, last_reply_at,
           latest_preview, latest_sender_type, latest_sender_id, first_unread_message_id,
           parent_message_id, parent_channel_id, parent_server_id, parent_preview,
           parent_sender_type, parent_sender_id, parent_seq, parent_created_at
         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`;
-      await carrier.query(v4Insert, [
+      await carrier.query(v5Insert, [
         server.id, owner.id, threadChannel.id, threadChannel.id,
         1, 1, HIGH_SEQ, latestMessageId, new Date("2026-07-30T00:00:00.000Z"),
         "reply preview", "user", owner.id, latestMessageId,
         parentMessage.id, parentChannel.id, server.id, parentMessage.content,
         "user", owner.id, String(parentMessage.seq), parentMessage.createdAt,
       ]);
-      await carrier.query(v4Insert, [
+      await carrier.query(v5Insert, [
         server.id, owner.id, zeroReplyThreadChannel.id, zeroReplyThreadChannel.id,
         0, 0, null, null, null,
         null, null, null, null,

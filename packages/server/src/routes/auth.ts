@@ -1,4 +1,5 @@
 import { serializeErrorForLog } from "../tracing/safeErrorLog";
+import { kickAppNotificationDelivery } from "../services/appNotificationDeliveryService";
 import { Router, urlencoded, type NextFunction, type Request, type Response, type Router as RouterType } from "express";
 import type { Server as SocketServer } from "socket.io";
 import multer from "multer";
@@ -1679,6 +1680,8 @@ authRouter.post("/accept-invite", requireAuth, requireProfileSetupComplete, asyn
       agreementId: typeof agreementId === "string" ? agreementId : null,
       ...getAgreementRequestMetadata(req),
     });
+    // Committed: deliver the server.member_added App Notification now.
+    kickAppNotificationDelivery();
     const io = req.app.get("io") as SocketServer | undefined;
     const agentOrchestrator = req.app.get("agentOrchestrator") as AgentOrchestrator | undefined;
     if (io) {

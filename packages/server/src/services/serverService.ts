@@ -3,7 +3,8 @@ import { createHash } from "crypto";
 import { eq, and, asc, isNull, inArray, sql, count, ne } from "drizzle-orm";
 import { getDb, type DatabaseExecutor } from "../db/index";
 import { CURRENT_CONTRACT_VERSION } from "./serverSetupStateService";
-import { servers, serverMembers, serverMembershipDepartures, serverMemberRoleAuditEvents, serverAgentMembers, users, channels, channelHumans, messages, agents, subscriptions, threadFollows } from "../db/schema";
+import { servers, serverMembers, serverMembershipDepartures, serverMemberRoleAuditEvents, serverAgentMembers, users, channels, channelHumans, messages, agents, subscriptions, threadFollows, oauthAccessTokens } from "../db/schema";
+import { emitAppFacingMemberEvents, kickAppNotificationDelivery } from "./appNotificationDeliveryService";
 import { ALL_CHANNEL_TEAM_THRESHOLD, canTransitionServerRole, currentDate, hasServerCapability, isAdminOrOwner, isOwnerRole, type ServerRole } from "@botiverse/raft-shared";
 import { untracedDbQuery, type DbQueryTracer } from "../tracing/dbQueryTrace";
 import * as serverAgreementService from "./serverAgreementService";
@@ -874,6 +875,13 @@ export async function addMember(
         eq(serverMembershipDepartures.serverId, serverId),
         eq(serverMembershipDepartures.userId, userId),
       ));
+      // Same commit as the insert: the event row is the outbox.
+      await emitAppFacingMemberEvents({
+        serverId,
+        eventType: "server.member_added",
+        members: [{ principalType: "human", principalId: userId, role }],
+        provenance: { source: "server_service", actor_type: "human", reason: options.agreementAudit?.source ?? "added" },
+      }, db);
     }
 
     // Adding someone straight in as owner is the second way into the (owner × checkpoint) set
@@ -946,16 +954,19 @@ export async function addMember(
     return !!inserted;
   };
 
+  // With a caller's executor the caller commits, and kicks app delivery after.
   if (options.executor) {
     return run(options.executor);
   }
 
-  return getDb().transaction(run);
+  const added = await getDb().transaction(run);
+  if (added) kickAppNotificationDelivery();
+  return added;
 }
 
 export async function removeMember(serverId: string, userId: string, options: RemoveMemberOptions = {}) {
   const db = getDb();
-  await db.transaction(async (tx) => {
+  const announced = await db.transaction(async (tx) => {
     // Task #101: keep the global order servers -> member rows -> resource rows. The `servers` row is locked FOR SHARE
     // first because the departure insert below takes a key-share lock on it through its foreign key, while
     // transitionMemberRole holds `servers` FOR UPDATE and then waits on member rows. The target's member row is locked
@@ -968,13 +979,14 @@ export async function removeMember(serverId: string, userId: string, options: Re
       WHERE id = ${serverId}
       FOR SHARE
     `);
-    await tx.execute(sql`
-      SELECT user_id
+    const memberRows = await tx.execute<{ role: string }>(sql`
+      SELECT role
       FROM server_members
       WHERE server_id = ${serverId}
         AND user_id = ${userId}
       FOR UPDATE
     `);
+    const removedRole = memberRows.rows[0]?.role;
 
     const serverChannelIds = await tx
       .select({ id: channels.id })
@@ -1027,7 +1039,28 @@ export async function removeMember(serverId: string, userId: string, options: Re
       eq(serverMembers.serverId, serverId),
       eq(serverMembers.userId, userId),
     ));
+    if (removedRole === undefined) return false;
+
+    // Sign-in with Raft tokens die with the membership. Without this they only
+    // fail while the user is absent and come back to life on rejoin; a member
+    // who returns signs in to their apps again.
+    await tx.update(oauthAccessTokens).set({ revokedAt: departedAt }).where(and(
+      eq(oauthAccessTokens.serverId, serverId),
+      eq(oauthAccessTokens.principalType, "human"),
+      eq(oauthAccessTokens.userId, userId),
+      isNull(oauthAccessTokens.revokedAt),
+    ));
+    // Same commit as the delete: the event row is the outbox.
+    const { recipientCount } = await emitAppFacingMemberEvents({
+      serverId,
+      eventType: "server.member_removed",
+      members: [{ principalType: "human", principalId: userId, role: removedRole }],
+      occurredAt: departedAt,
+      provenance: { source: "server_service", actor_type: "human", reason: options.reason ?? "removed" },
+    }, tx);
+    return recipientCount > 0;
   });
+  if (announced) kickAppNotificationDelivery();
   await revokeSocketAccess({ userId, removedFromServerId: serverId });
 }
 
@@ -1236,6 +1269,12 @@ export async function transitionMemberRole(input: {
     if (isOwnerRole(input.nextRole)) {
       await reconcileOwnersToSetupCheckpoint(tx, input.serverId, { onlyUserId: input.targetUserId });
     }
+    await emitAppFacingMemberEvents({
+      serverId: input.serverId,
+      eventType: "server.member_role_changed",
+      members: [{ principalType: "human", principalId: input.targetUserId, role: input.nextRole }],
+      provenance: { source: "server_service", actor_type: "human", previous_role: target.role },
+    }, tx);
     return {
       changed: true,
       previousRole: target.role,
@@ -1243,6 +1282,7 @@ export async function transitionMemberRole(input: {
       removedAllChannelIds,
     };
   });
+  if (result.changed) kickAppNotificationDelivery();
   // Authorized idempotent retries must repair a failed post-commit fanout too.
   await revokeSocketAccess({ userId: input.targetUserId });
   return result;
@@ -1254,13 +1294,32 @@ export async function updateAgentMemberRole(
   role: Extract<ServerRole, "admin" | "member">,
   options: { executor?: DatabaseExecutor } = {},
 ) {
-  const db = options.executor ?? getDb();
-  const [updated] = await db
-    .update(serverAgentMembers)
-    .set({ role })
-    .where(and(eq(serverAgentMembers.serverId, serverId), eq(serverAgentMembers.agentId, agentId)))
-    .returning();
-  return updated || null;
+  const change = async (db: DatabaseExecutor) => {
+    const [previous] = await db
+      .select({ role: serverAgentMembers.role })
+      .from(serverAgentMembers)
+      .where(and(eq(serverAgentMembers.serverId, serverId), eq(serverAgentMembers.agentId, agentId)))
+      .for("update");
+    const [updated] = await db
+      .update(serverAgentMembers)
+      .set({ role })
+      .where(and(eq(serverAgentMembers.serverId, serverId), eq(serverAgentMembers.agentId, agentId)))
+      .returning();
+    if (updated && previous && previous.role !== role) {
+      await emitAppFacingMemberEvents({
+        serverId,
+        eventType: "server.member_role_changed",
+        members: [{ principalType: "agent", principalId: agentId, role }],
+        provenance: { source: "server_service", actor_type: "human", previous_role: previous.role },
+      }, db);
+    }
+    return updated || null;
+  };
+  // With a caller's executor the caller commits, and kicks app delivery after.
+  if (options.executor) return change(options.executor);
+  const updated = await getDb().transaction(change);
+  if (updated) kickAppNotificationDelivery();
+  return updated;
 }
 
 export async function countOwners(serverId: string) {
@@ -2087,6 +2146,11 @@ export async function deleteServer(serverId: string) {
       .where(and(eq(servers.id, serverId), ne(servers.kind, "joint_storage")));
     if (!existing) return null;
 
+    // Announce every member's removal before the tombstone, in the same commit.
+    const announced = existing.deletedAt == null
+      ? await announceServerDeletionToApps(tx, serverId)
+      : false;
+
     const [updated] = existing.deletedAt == null
       ? await tx
         .update(servers)
@@ -2102,6 +2166,29 @@ export async function deleteServer(serverId: string) {
     return {
       server: updated ?? existing,
       newlyDeleted: Boolean(updated),
+      announced,
     };
+  }).then((result) => {
+    if (result?.announced) kickAppNotificationDelivery();
+    return result && { server: result.server, newlyDeleted: result.newlyDeleted };
   });
+}
+
+async function announceServerDeletionToApps(tx: DatabaseExecutor, serverId: string): Promise<boolean> {
+  const [humans, agentMembers] = await Promise.all([
+    tx.select({ principalId: serverMembers.userId, role: serverMembers.role })
+      .from(serverMembers).where(eq(serverMembers.serverId, serverId)),
+    tx.select({ principalId: serverAgentMembers.agentId, role: serverAgentMembers.role })
+      .from(serverAgentMembers).where(eq(serverAgentMembers.serverId, serverId)),
+  ]);
+  const { recipientCount } = await emitAppFacingMemberEvents({
+    serverId,
+    eventType: "server.member_removed",
+    members: [
+      ...humans.map((member) => ({ principalType: "human" as const, ...member })),
+      ...agentMembers.map((member) => ({ principalType: "agent" as const, ...member })),
+    ],
+    provenance: { source: "server_service", actor_type: "human", reason: "server_deleted" },
+  }, tx);
+  return recipientCount > 0;
 }

@@ -37,7 +37,8 @@ import {
   type Tracer,
   type MachineId,
   type SkillInfo,
-  type RuntimeAccountUsageProvider
+  type RuntimeAccountUsageProvider,
+  MODEL_SEEN_MAX_ITEMS_PER_REPORT,
 } from "@botiverse/raft-shared";
 import {
   REPLICA_ID,
@@ -699,9 +700,12 @@ class DeterministicAgentOrchestrator extends AgentOrchestrator {
     return true;
   }
 
-  protected override async persistAgentLastRuntimeError(_agentId: string, _lastRuntimeError: AgentRuntimeErrorState) {
+  protected override async persistAgentLastRuntimeError(
+    _agentId: string,
+    lastRuntimeError: AgentRuntimeErrorState,
+  ): Promise<AgentRuntimeErrorState | null> {
     // No-op in deterministic tests; runtime error state is asserted via cache state.
-    return true;
+    return lastRuntimeError;
   }
 
   protected override async clearPersistedAgentLastRuntimeError(_agentId: string) {
@@ -4916,9 +4920,9 @@ test("runtime-error Redis authority is not published when durable set returns fa
       super(store, new FakeClock());
     }
 
-    protected override async persistAgentLastRuntimeError(): Promise<boolean> {
+    protected override async persistAgentLastRuntimeError(): Promise<AgentRuntimeErrorState | null> {
       if (this.rejection === "throw") throw new Error("durable set failed");
-      return false;
+      return null;
     }
   }
 
@@ -4957,6 +4961,45 @@ test("runtime-error Redis authority is not published when durable set returns fa
       owner.shutdown();
       reader.shutdown();
     }
+  }
+});
+
+test("a repeated runtime error kept by the durable row publishes the stored state and still shows the error activity", async () => {
+  const stored: AgentRuntimeErrorState = {
+    message: "You've hit your usage limit",
+    at: "2026-08-02T12:00:00.000Z",
+    launchId: "launch-1",
+    actionRequired: true,
+  };
+  class StoredRuntimeErrorOrchestrator extends DeterministicAgentOrchestrator {
+    // The row already holds the same error from the previous launch, so the
+    // durable set keeps it and returns it (setAgentLastRuntimeError).
+    protected override async persistAgentLastRuntimeError(): Promise<AgentRuntimeErrorState | null> {
+      return stored;
+    }
+  }
+
+  const store = new InMemoryReplicaStateStore();
+  store.machineReplicas.add("machine-1");
+  const owner = new StoredRuntimeErrorOrchestrator(store, new FakeClock());
+  const reader = new DeterministicAgentOrchestrator(store, new FakeClock());
+  seedActiveAgent(owner);
+  seedActiveAgent(reader);
+  const repeat: AgentRuntimeErrorState = { ...stored, at: "2026-08-02T12:03:00.000Z", launchId: "launch-2" };
+
+  try {
+    assert.equal(await (owner as any).rememberRuntimeError("agent-1", repeat), true);
+    // Cache and Redis carry the row's state, never the unwritten repeat.
+    assert.deepEqual((owner as any).agentStateCache.get("agent-1")?.lastRuntimeError, stored);
+    assert.deepEqual(store.agentRuntimeErrors.get("agent-1")?.error, stored);
+    // The agent still shows the error (a relaunch in between must not leave it "working").
+    assert.deepEqual(await reader.getActivity("agent-1"), {
+      activity: "error",
+      activityDetail: stored.message,
+    });
+  } finally {
+    owner.shutdown();
+    reader.shutdown();
   }
 });
 
@@ -10808,6 +10851,18 @@ test("agent:model-seen reports move the read position only for the launch the gu
     items: [{ channelId: "c-1", seqs: [11, 12] }, { channelId: "c-2", seqs: [40] }],
   });
   assert.deepEqual(orchestrator.applied, [{ channelId: "c-1", seqs: [11, 12] }, { channelId: "c-2", seqs: [40] }]);
+
+  orchestrator.applied.length = 0;
+  await orchestrator.handleMachineMessage("machine-1", {
+    type: "agent:model-seen",
+    agentId: "agent-1",
+    launchId: "L-2",
+    items: Array.from({ length: MODEL_SEEN_MAX_ITEMS_PER_REPORT + 5 }, (_, index) => ({ channelId: `c-${index}`, seqs: [1] })),
+  });
+  assert.equal(orchestrator.applied.length, MODEL_SEEN_MAX_ITEMS_PER_REPORT, "an oversized report applies only the first items");
+  // (cast: the earlier deepEqual assertions narrowed `applied`)
+  const lastApplied = (orchestrator.applied as ReadonlyArray<{ channelId: string }>).at(-1);
+  assert.equal(lastApplied?.channelId, `c-${MODEL_SEEN_MAX_ITEMS_PER_REPORT - 1}`);
   orchestrator.shutdown();
 });
 
@@ -18603,8 +18658,11 @@ test("agent:wake:request with a daemon traceparent keeps the wake and its start 
     assert.equal(wakeSpan.attrs?.machine_id, "machine-1");
     assert.equal(wakeSpan.attrs?.wake_request_id, "a".repeat(32));
     assert.equal(wakeSpan.attrs?.app_id, "system.reminder");
-    assert.equal(spanEvents(sink, wakeSpan).at(-1)?.name, "wake_request.answered");
-    assert.equal(spanEvents(sink, wakeSpan).at(-1)?.attrs?.outcome, "dispatched");
+    // The answer is the wake span's own last event. The merged event list
+    // (spanEvents) also holds standalone events such as server.agent.owner_route,
+    // ordered by millisecond only: in the same millisecond its order is arbitrary.
+    assert.equal(wakeSpan.events.at(-1)?.name, "wake_request.answered");
+    assert.equal(wakeSpan.events.at(-1)?.attrs?.outcome, "dispatched");
 
     const startDispatchSpan = sink.getAllSpans().find((span) => span.name === "server.agent.start_dispatch");
     assert.ok(startDispatchSpan, "start dispatch span recorded");
@@ -19795,4 +19853,64 @@ test("machine disk reports are kept per connection and notify clients only when 
   assert.equal(updates().length, 2, "clearing the warning notifies again");
   assert.equal(await orchestrator.getMachineDiskStatus("machine-unknown"), null);
   orchestrator.shutdown();
+});
+
+test("getActivity with the caller's row: a deleted agent and an inactive live agent resolve without agent or activity-log reads", async () => {
+  class CountingOrchestrator extends DeterministicAgentOrchestrator {
+    deliveryLoads = 0;
+    hintLoads = 0;
+    protected override async loadAgentForDelivery(agentId: string): Promise<any> {
+      this.deliveryLoads += 1;
+      return super.loadAgentForDelivery(agentId);
+    }
+    protected override async loadLatestPersistedActivityHint(agentId: string): Promise<any> {
+      this.hintLoads += 1;
+      return super.loadLatestPersistedActivityHint(agentId);
+    }
+  }
+  const row = (id: string, overrides: Record<string, unknown>): any => ({
+    id,
+    serverId: "server-1",
+    machineId: null,
+    sessionId: null,
+    status: "inactive",
+    name: id,
+    displayName: null,
+    avatarUrl: null,
+    description: null,
+    model: "gpt-5",
+    runtime: "codex",
+    lastRuntimeError: null,
+    reasoningEffort: null,
+    envVars: null,
+    executionMode: "cloud",
+    deletedAt: null,
+    createdAt: new Date(0),
+    updatedAt: new Date(0),
+    ...overrides,
+  });
+  const orchestrator = new CountingOrchestrator(new InMemoryReplicaStateStore(), new FakeClock());
+  try {
+    // Deleted: getAgent(id, false) would return null, so the row answers the
+    // cache miss and the authoritative re-reads without a query. (Without the
+    // row, the cache miss reads the database, which this test has none of.)
+    const deleted = await orchestrator.getActivity("agent-deleted", {
+      persistedAgent: row("agent-deleted", { deletedAt: new Date(1) }),
+    });
+    assert.equal(deleted.activity, "offline");
+    assert.equal(orchestrator.deliveryLoads, 0);
+    assert.equal(orchestrator.hintLoads, 0);
+    assert.equal((orchestrator as any).agentStateCache.has("agent-deleted"), false);
+
+    // Live but inactive: the row seeds the cache; the persisted activity hint
+    // cannot apply to an inactive agent, so it is not read.
+    const inactive = await orchestrator.getActivity("agent-inactive", {
+      persistedAgent: row("agent-inactive", {}),
+    });
+    assert.equal(inactive.activity, "offline");
+    assert.equal((orchestrator as any).agentStateCache.get("agent-inactive")?.status, "inactive");
+    assert.equal(orchestrator.hintLoads, 0);
+  } finally {
+    orchestrator.shutdown();
+  }
 });

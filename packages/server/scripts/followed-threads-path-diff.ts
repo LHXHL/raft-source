@@ -1,7 +1,7 @@
 #!/usr/bin/env -S node --import=@oxc-node/core/register
 /**
  * Read-only comparison of GET /api/channels/threads/followed's two paths for one
- * (server, user): the active-follows RisingWave path (rw_followed_threads_v4)
+ * (server, user): the active-follows RisingWave path (rw_followed_threads_v5)
  * and the legacy all-Postgres list (forceLegacyPath), both with the server
  * plan's history cutoff, exactly as the route calls getFollowedThreads.
  *
@@ -116,7 +116,7 @@ async function main() {
       legacy = await runPath(options, historyCutoff, true);
     }
     const diff = diffThreads(rw.threads, legacy.threads);
-    const rwServed = rw.source?.followed_threads_source === "rw_v4";
+    const rwServed = rw.source?.followed_threads_source === "rw_v5";
     const identical = diff.onlyInRw.length === 0 && diff.onlyInLegacy.length === 0 && diff.fieldDiffs.length === 0;
     console.log(JSON.stringify({
       ok: rwServed && identical,

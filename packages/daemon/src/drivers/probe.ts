@@ -21,6 +21,8 @@ export interface ProbeDeps {
   /** Optional fs.statSync stand-in (mtime/size probe cache keys). */
   statSyncFn?: (filePath: string) => { mtimeMs: number; size: number };
   execFileSyncFn?: typeof execFileSync;
+  /** Optional fs.readFileSync stand-in (Windows batch wrapper parsing). */
+  readFileSyncFn?: (filePath: string, encoding: "utf8") => string;
   windowsEnvironmentReaderFn?: WindowsEnvironmentReader;
 }
 
@@ -254,13 +256,6 @@ function resolveCommandOnWindows(
   } catch {
     return null;
   }
-}
-
-export function requiresWindowsShell(command: string | null | undefined, platform: NodeJS.Platform = process.platform): boolean {
-  if (platform !== "win32") return false;
-  if (!command) return false;
-  const lower = command.toLowerCase();
-  return lower.endsWith(".cmd") || lower.endsWith(".bat");
 }
 
 const POSIX_USER_BIN_DIRS = [[".local", "bin"], [".kimi-code", "bin"]] as const;

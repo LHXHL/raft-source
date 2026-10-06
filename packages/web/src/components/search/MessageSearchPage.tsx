@@ -97,7 +97,6 @@ import AvatarSlot from "../ui/AvatarSlot";
 import DismissBackdrop from "../ui/DismissBackdrop";
 import MenuItem from "../ui/MenuItem";
 import {
-  ARCHIVED_CHANNEL_BADGE_CLASS,
   ARCHIVED_CHANNEL_ICON_CLASS,
   ARCHIVED_CHANNEL_MUTED_TEXT_CLASS,
   ARCHIVED_CHANNEL_TEXT_CLASS,
@@ -2152,18 +2151,13 @@ export default function MessageSearchPage({ onOpenPanelRef, onDragPanelRef, acti
             <span className={`truncate text-sm font-bold ${isArchivedChannelResult ? ARCHIVED_CHANNEL_TEXT_CLASS : "text-foreground-strong"}`}>
               {result.title}
             </span>
-            {(() => {
-              const typeLabel = result.type === "channel" ? formatMessage({ id: "search.channel" }) : result.type === "computer" ? formatMessage({ id: "search.badgeComputer" }) : result.type === "agentDm" ? formatMessage({ id: "search.badgeAgent" }) : formatMessage({ id: "search.badgeHuman" });
-              return isArchivedChannelResult ? (
-                <span className={`${ARCHIVED_CHANNEL_BADGE_CLASS} uppercase`}>{typeLabel}</span>
-              ) : (
-                <Badge appearance="soft" variant="muted" uppercase>{typeLabel}</Badge>
-              );
-            })()}
+            <Badge appearance="soft" variant="muted" uppercase>
+              {result.type === "channel" ? formatMessage({ id: "search.channel" }) : result.type === "computer" ? formatMessage({ id: "search.badgeComputer" }) : result.type === "agentDm" ? formatMessage({ id: "search.badgeAgent" }) : formatMessage({ id: "search.badgeHuman" })}
+            </Badge>
             {result.archivedAt && (
-              <span className={`${isArchivedChannelResult ? ARCHIVED_CHANNEL_BADGE_CLASS : "border border-warning bg-warning-soft px-1 py-0.5 text-[9px] font-bold leading-none text-warning-strong theme-brutal:border-black theme-brutal:bg-brutal-orange/30 theme-brutal:text-black"} uppercase`}>
+              <Badge appearance="soft" variant={isArchivedChannelResult ? "muted" : "warning"} uppercase>
                 {formatMessage({ id: "search.archived" })}
-              </span>
+              </Badge>
             )}
           </SearchEntityResultHeader>
           <SearchEntityResultDescription className={isArchivedChannelResult ? ARCHIVED_CHANNEL_MUTED_TEXT_CLASS : undefined}>

@@ -14,6 +14,7 @@ import { httpRequestDuration, httpRequestsTotal } from "../metrics";
 import { normalizeRequestRoutePattern } from "./requestRoutePattern";
 import { runWithTraceSpan } from "../tracing/semanticTrace";
 import { agentIdHashAttrs, serverIdHashAttrs } from "../tracing/traceIdentity";
+import { cachedTraceUserId } from "../tracing/traceUserId";
 
 export type HttpStatusBucket = "2xx" | "3xx" | "4xx" | "5xx" | "other";
 export type HttpCallerKind = "human" | "agent" | "system";
@@ -32,10 +33,13 @@ const HTTP_REQUEST_SCOPE_ATTR_KEYS = [
   "agent_id_present",
   "agent_id_hash",
   "server_id_hash",
+  "trace_user_id",
   "session_id",
   "session_id_present",
   "auth_trace_source",
   "auth_trace_reason",
+  // A route's stable failure code (setRequestTraceErrorCode), e.g. rw_overloaded.
+  "error_code",
 ] as const;
 
 const HTTP_REQUEST_TRACE_ATTR_CONTRACTS = {
@@ -195,6 +199,22 @@ function buildInitialRequestTraceScope(req: Request): TraceScope {
   };
 }
 
+const REQUEST_TRACE_ERROR_CODE_LOCAL = "traceErrorCode";
+
+/**
+ * A stable, low-cardinality code for why this request failed (e.g.
+ * "rw_overloaded"), recorded as error_code on server.http.request alongside the
+ * status-derived `reason`, which keeps its meaning.
+ */
+export function setRequestTraceErrorCode(res: { locals?: Record<string, unknown> }, code: string): void {
+  if (res.locals) res.locals[REQUEST_TRACE_ERROR_CODE_LOCAL] = code;
+}
+
+function requestTraceErrorCodeAttrs(res: { locals?: Record<string, unknown> }): { error_code?: string } {
+  const code = res.locals?.[REQUEST_TRACE_ERROR_CODE_LOCAL];
+  return typeof code === "string" && code ? { error_code: code } : {};
+}
+
 export function requestObservabilityMiddleware(req: Request, res: Response, next: NextFunction): void {
   const endTimer = httpRequestDuration.startTimer();
   const baseTracer = (req.app?.get?.("serverTracer") as Tracer | undefined) ?? noopTracer;
@@ -224,6 +244,8 @@ export function requestObservabilityMiddleware(req: Request, res: Response, next
       ...projectAuthTraceIdentityAttrs(req),
       ...agentIdHashAttrs(traceAgentIdOf(req)),
       ...serverIdHashAttrs(req.serverId),
+      ...requestTraceUserIdAttrs(req),
+      ...requestTraceErrorCodeAttrs(res),
     };
     const labels = {
       route_pattern: routePattern,
@@ -284,4 +306,18 @@ function projectAuthTraceIdentityAttrs(req: Request): TraceAttributes {
 
 function toTraceStatus(statusCode: number): TraceStatus {
   return statusCode >= 500 ? "error" : "ok";
+}
+
+/**
+ * Every authenticated request names its user as the random trace_user_id, not
+ * only the auth routes (whose raw user_id the export sink rewrites). The raw id
+ * never enters the span: the value comes from the cache that this request's
+ * auth check already filled (verifyActiveAccessToken), so it is a synchronous
+ * hit. Lets per-user questions (e.g. one user's followed threads staying
+ * incomplete across requests) be answered from traces.
+ */
+function requestTraceUserIdAttrs(req: Request): { trace_user_id?: string } {
+  if (req.authTraceIdentity?.userId || !req.userId) return {};
+  const traceUserId = cachedTraceUserId(req.userId);
+  return traceUserId ? { trace_user_id: traceUserId } : {};
 }

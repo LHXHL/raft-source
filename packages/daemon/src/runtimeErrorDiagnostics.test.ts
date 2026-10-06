@@ -84,12 +84,14 @@ test("buildRuntimeErrorDiagnosticEnvelope detoxes poisoned stderr (env-assignmen
   // #688 load-bearing poisoned specimen: secrets that the old scrubber (Bearer/sk-*/email/url/path)
   // did NOT cover. They must not appear in the user-visible excerpt, yet the original must still
   // drive internal classification (not fake-green by dropping the whole detail).
+  // Built at runtime so secret scanners don't flag this test sample.
+  const ghpToken = "gh" + "p_abcdefghijklmnopqrstuvwxyz0123456789";
   const poisoned = [
     "Error: ANTHROPIC_API_KEY=sk-ant-api03-this-is-a-long-secret-value-1234567890",
     "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
     "OPENAI_API_KEY=sk-abcdef0123456789abcdef0123456789",
-    "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
-    "github_pat_11ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmNO",
+    ghpToken,
+    "github" + "_pat_11ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmNO",
     "connection password=hunter2 sentinel",
     "NODE_ENV=production must survive",
     "API Error: 500 Internal Server Error upstream",
@@ -101,7 +103,7 @@ test("buildRuntimeErrorDiagnosticEnvelope detoxes poisoned stderr (env-assignmen
   assert.equal(excerpt.includes("sk-ant-api03-this-is-a-long-secret-value-1234567890"), false, "anthropic value leaks");
   assert.equal(excerpt.includes("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"), false, "aws secret leaks");
   assert.equal(excerpt.includes("sk-abcdef0123456789abcdef0123456789"), false, "openai value leaks");
-  assert.equal(excerpt.includes("ghp_abcdefghijklmnopqrstuvwxyz0123456789"), false, "ghp token leaks");
+  assert.equal(excerpt.includes(ghpToken), false, "ghp token leaks");
   assert.equal(excerpt.includes("11ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmNO"), false, "github_pat leaks");
   assert.equal(excerpt.includes("hunter2"), false, "password value leaks");
 

@@ -77,6 +77,8 @@ import { getWebCorsOriginOption } from "./config/appUrl";
 import { globalJsonServerErrorHandler } from "./routes/errorResponse";
 import { readBuildIdentityStatus } from "./version";
 
+
+export const CORS_PREFLIGHT_MAX_AGE_SECONDS = 7200;
 export function rateLimitUserOrIpKey(req: Pick<Request, "ip" | "userId">): string {
   return req.userId || ipKeyGenerator(req.ip ?? "unknown");
 }
@@ -192,7 +194,11 @@ export function createApp(options: CreateAppOptions = {}): Express {
   }));
 
   const corsOrigin = getWebCorsOriginOption();
-  app.use(cors({ origin: corsOrigin, credentials: true }));
+  // The web app calls the API cross-origin with an Authorization header, so
+  // every request needs a preflight. Without Access-Control-Max-Age Chrome
+  // caches each one for 5s (per URL + method + headers): on prod a channel
+  // switch sent 13 OPTIONS round trips ahead of its GETs. 7200s is Chrome's cap.
+  app.use(cors({ origin: corsOrigin, credentials: true, maxAge: CORS_PREFLIGHT_MAX_AGE_SECONDS }));
   app.use((_req, res, next) => {
     res.setHeader("X-Robots-Tag", "noindex, nofollow");
     next();

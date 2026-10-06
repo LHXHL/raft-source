@@ -49,7 +49,7 @@ export type ActivityReadSource = {
   /** Replaces the RisingWave followed-thread stats read (no cutoff, no upper bound). */
   followedThreadStats(query: FollowedThreadStatsQuery): Promise<FollowedThreadStatsRow[]>;
   /**
-   * Replaces the rw_followed_threads_v4 read of getFollowedThreads' active path:
+   * Replaces the rw_followed_threads_v5 read of getFollowedThreads' active path:
    * every row of (server, user), all follow states.
    */
   followedThreadRows(query: FollowedThreadRowsQuery): Promise<FollowedThreadRwRow[]>;

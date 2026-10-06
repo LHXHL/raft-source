@@ -498,6 +498,9 @@ export interface AgentModelSeenItem {
   seqs: number[];
 }
 
+/** Most conversations one `agent:model-seen` report may carry; the Server ignores the rest, the daemon splits. */
+export const MODEL_SEEN_MAX_ITEMS_PER_REPORT = 50;
+
 export const DAEMON_CAPABILITY_MODEL_SEEN_BOUNDARY = "agent:model-seen-boundary";
 /**
  * RFC 069 §8: the daemon reports agent state only through sequenced, replayed

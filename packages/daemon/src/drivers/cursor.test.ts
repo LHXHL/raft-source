@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import path from "node:path";
 import os from "node:os";
+import { resolveCursorLaunch } from "./cursor";
 import { readFileSync, rmSync } from "node:fs";
 import {
   CursorDriver,
@@ -448,4 +449,48 @@ test("on Windows the deadline kills the whole probe tree through the tree killer
   assert.equal(result.timedOut, true);
   assert.equal(calls.length, 1);
   assert.equal(calls[0].platform, "win32");
+});
+
+test("Cursor on Windows runs the newest installed version's node.exe + index.js, not the cmd/PowerShell wrapper", () => {
+  const root = "C:\\Users\\tester\\AppData\\Local\\cursor-agent";
+  const shim = `${root}\\cursor-agent.cmd`;
+  const older = `${root}\\versions\\2026.9.30-abc1234`;
+  const newer = `${root}\\versions\\2026.10.01-e373342`;
+  const files = new Set([shim, `${older}\\node.exe`, `${older}\\index.js`, `${newer}\\node.exe`, `${newer}\\index.js`]);
+  const prompt = "New message:\r\nhi & a | b > c ^ \"q\" %PATH%";
+  const env = { Path: "C:\\Windows\\System32", NO_COLOR: "1" };
+
+  const launch = resolveCursorLaunch(["--print", prompt], {
+    platform: "win32",
+    env,
+    windowsEnvironmentReaderFn: () => ({}),
+    existsSyncFn: (file) => files.has(file),
+    readdirSyncFn: (dir) => {
+      assert.equal(dir, `${root}\\versions`);
+      return ["2026.9.30-abc1234", "not-a-version", "2026.10.01-e373342"];
+    },
+    execFileSyncFn: ((command: string) => {
+      assert.equal(command, "powershell.exe");
+      return Buffer.from(`${shim}\r\n`);
+    }) as any,
+  });
+
+  assert.deepEqual(launch, {
+    command: `${newer}\\node.exe`,
+    args: [`${newer}\\index.js`, "--print", prompt],
+    env: { ...env, CURSOR_INVOKED_AS: "cursor-agent.cmd" },
+    shell: false,
+  });
+});
+
+test("Cursor on Windows rejects a wrapper with no usable installed version instead of using cmd.exe", () => {
+  const shim = "C:\\Users\\tester\\AppData\\Local\\cursor-agent\\cursor-agent.cmd";
+  assert.throws(() => resolveCursorLaunch(["--print", "hi"], {
+    platform: "win32",
+    windowsEnvironmentReaderFn: () => ({}),
+    existsSyncFn: (file) => file === shim,
+    readdirSyncFn: () => [],
+    readFileSyncFn: () => "%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -File \"%SCRIPT_DIR%\\cursor-agent.ps1\" %*\r\n",
+    execFileSyncFn: (() => Buffer.from(`${shim}\r\n`)) as any,
+  }), (error: unknown) => (error as { reason?: string }).reason === "batch_target_unresolved");
 });

@@ -55,7 +55,7 @@
   "embedPanelHeader.behavior.test.tsx": 4,
   "externalAgentSetupTabs.test.ts": 6,
   "externalSetup.i18n.behavior.test.tsx": 1,
-  "forwardedBundleImageStrip.behavior.test.tsx": 3,
+  "forwardedBundleCard.behavior.test.tsx": 3,
   "gravatarAvatarFallback.test.tsx": 3,
   "grokModelDetection.behavior.test.tsx": 2,
   "historyTopState.behavior.test.tsx": 1,

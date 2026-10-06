@@ -12,6 +12,7 @@ import { AgentProcessManager } from "./agentProcessManager";
 import { installDaemonFetchMockForTests } from "./daemonFetch";
 import { BuiltInDriver } from "./drivers/pi";
 import { traceRows } from "./testing/traceRows";
+import { releaseAgentManagerForTests } from "./testing/agentManagerTeardown";
 
 const BUILTIN_AUTH_ERROR_MESSAGE =
   "Built-in provider authentication failed. Check this agent's provider API key and region/provider selection, then retry starting this agent.";
@@ -125,22 +126,6 @@ function installManagedRunnerMintFetch(): () => void {
   }) as typeof fetch);
 }
 
-function cleanupTestManager(manager: AgentProcessManager): void {
-  if ((manager as any).agentStartPumpTimer) clearTimeout((manager as any).agentStartPumpTimer);
-  for (const ap of (manager as any).agents?.values?.() ?? []) {
-    ap.notifications.clearTimer();
-    if (ap.pendingTrajectory?.timer) clearTimeout(ap.pendingTrajectory.timer);
-    if (ap.activityHeartbeat?.kind === "active") clearInterval(ap.activityHeartbeat.timer);
-    if (ap.startup?.kind === "waiting" && ap.startup.timer) clearTimeout(ap.startup.timer);
-    if (ap.exit?.kind === "live" && ap.exit.stalledRecoverySigtermTimer) clearTimeout(ap.exit.stalledRecoverySigtermTimer);
-    if (ap.compaction?.kind === "active" && ap.compaction.watchdog) clearTimeout(ap.compaction.watchdog);
-    if (ap.runtimeErrorDeliveryBackoff?.kind === "backing_off" && ap.runtimeErrorDeliveryBackoff.timer) {
-      clearTimeout(ap.runtimeErrorDeliveryBackoff.timer);
-    }
-  }
-  (manager as any).agents?.clear?.();
-}
-
 test("Built-in native SDK provider 401 is surfaced as action-required runtime error activity", { timeout: 45_000 }, async () => {
   await withOpenAiCompatible401Provider(async (baseUrl, providerRequests) => {
     const dataDir = await mkdtemp(path.join(os.tmpdir(), "slock-builtin-auth-e2e-"));
@@ -195,7 +180,7 @@ test("Built-in native SDK provider 401 is surfaced as action-required runtime er
       );
     } finally {
       await manager.stopAgent("agent-1").catch(() => {});
-      cleanupTestManager(manager);
+      await releaseAgentManagerForTests(manager);
       restoreFetch();
       await rm(dataDir, { recursive: true, force: true });
     }
@@ -265,7 +250,7 @@ test("every daemon agent:activity send declares an explicit isHeartbeat bit (thr
       );
     } finally {
       await manager.stopAgent("agent-1").catch(() => {});
-      cleanupTestManager(manager);
+      await releaseAgentManagerForTests(manager);
       restoreFetch();
       await rm(dataDir, { recursive: true, force: true });
     }
@@ -369,7 +354,7 @@ test("idle restart snapshot produces a handoff marker carrying the cached launch
     assert.equal(marker.processInstanceId, "pi-idle-v3",
       "idle-snapshot marker must carry the cached processInstanceId when available");
   } finally {
-    cleanupTestManager(manager);
+    await releaseAgentManagerForTests(manager);
     await rm(dataDir, { recursive: true, force: true });
   }
 });
@@ -410,7 +395,7 @@ test("real live->idle snapshot paths cache processInstanceId (startup-timeout re
     assert.equal(snap!.processInstanceId, "pi-real-v3",
       "real live->idle path must cache processInstanceId (Leiysky remaining blocker: sites cached launchId only)");
   } finally {
-    cleanupTestManager(manager);
+    await releaseAgentManagerForTests(manager);
     await rm(dataDir, { recursive: true, force: true });
   }
 });
@@ -488,7 +473,7 @@ test("daemon activity trace rows carry the isHeartbeat provenance bit matching t
       }
     } finally {
       await manager.stopAgent("agent-1").catch(() => {});
-      cleanupTestManager(manager);
+      await releaseAgentManagerForTests(manager);
       restoreFetch();
       await rm(dataDir, { recursive: true, force: true });
     }

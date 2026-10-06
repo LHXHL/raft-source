@@ -22,7 +22,7 @@ type MessageAttachment = NonNullable<Message["attachments"]>[number];
 // 不同的 attachment chip 内容物的 layout 和字体大小也全都要统一" — both compact
 // and wide now render the same canonical chip (filename / meta / optional
 // summary stacked vertically). The exception is the inline image gallery
-// (separate surface, see `buildImageGalleryRows` in MessageItem) which keeps
+// (separate surface, the message gallery's raft-ui row builder) which keeps
 // its preview-image-in-top-left layout per stdrc's exception.
 //
 // 2026-09-23 (task #640 follow-up, Artea): the shell migrated from the
@@ -140,7 +140,7 @@ export function AttachmentChip({
   const loadingBar = (
     <div
       data-message-affordance="attachment-preview-loading"
-      className="absolute inset-x-0 bottom-0 flex h-6 items-center gap-1.5 border-t border-line-muted bg-primary-400 px-2 text-[10px] font-bold uppercase tracking-wide text-primary-950 theme-brutal:border-t-2 theme-brutal:border-black theme-brutal:bg-soft-signal theme-brutal:text-black"
+      className="absolute inset-x-0 bottom-0 flex h-6 items-center gap-1.5 border-t border-line-muted bg-primary-soft px-2 text-[10px] font-bold uppercase tracking-wide text-primary-strong theme-brutal:border-t-2 theme-brutal:border-black theme-brutal:bg-soft-signal theme-brutal:text-black"
     >
       <Spinner size="xs" aria-label={formatMessage({ id: "common.loadingLabel" })} />
       <span className="truncate">{resolvedLoadingLabel}</span>

@@ -545,7 +545,7 @@ export default function PublicServerPage({
                 key={channel.id}
                 type="button"
                 onClick={() => selectPublicChannel(displayChannels.find((item) => item.id === channel.id)!)}
-                className={`mb-1 flex w-full items-center gap-1.5 rounded-md border px-2 py-1 text-left text-sm font-medium theme-brutal:rounded-none theme-brutal:border-2 ${selectedChannelId === channel.id ? "border-line-strong bg-accent-400 font-bold text-accent-950 shadow-raft-sm theme-brutal:border-black theme-brutal:bg-brutal-pink theme-brutal:text-black theme-brutal:shadow-brutal-sm" : "border-transparent transition-colors hover:border-line-muted hover:bg-layer-panel hover:shadow-raft-sm theme-brutal:hover:border-black theme-brutal:hover:bg-white theme-brutal:hover:shadow-brutal-sm"}`}
+                className={`mb-1 flex w-full items-center gap-1.5 rounded-md border px-2 py-1 text-left text-sm font-medium theme-brutal:rounded-none theme-brutal:border-2 ${selectedChannelId === channel.id ? "border-line-strong bg-accent-soft font-bold text-accent-strong shadow-raft-sm theme-brutal:border-black theme-brutal:bg-brutal-pink theme-brutal:text-black theme-brutal:shadow-brutal-sm" : "border-transparent transition-colors hover:border-line-muted hover:bg-layer-panel hover:shadow-raft-sm theme-brutal:hover:border-black theme-brutal:hover:bg-white theme-brutal:hover:shadow-brutal-sm"}`}
               >
                 <Hash size={15} className="shrink-0" />
                 <span className="min-w-0 truncate">{channel.name}</span>

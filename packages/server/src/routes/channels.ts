@@ -45,7 +45,7 @@ import { addTraceEvent, createTraceDbQueryTracer, getCurrentTraceContext, traceP
 import { getThumbnailUrl, normalizeAttachmentFilename, resolveAttachmentMimeType } from "./attachments";
 import { CHANNEL_NOT_FOUND_BODY, denyChannelAccess } from "./channelAccessDenial";
 import { MAX_MESSAGE_LENGTH } from "./messages";
-import { sendJsonServerError } from "./errorResponse";
+import { respondToRisingWaveOverload, sendJsonServerError } from "./errorResponse";
 import { UUID_RE as ANY_UUID_RE } from "../lib/messageId";
 import { guardUuidPathParams } from "../lib/uuidPathParams";
 import {
@@ -1151,7 +1151,8 @@ channelRouter.get("/unread", async (req, res) => {
       response_summary: wantsSummary,
     });
     res.json(wantsSummary ? { channels: loaded } : loaded);
-  } catch {
+  } catch (err) {
+    if (respondToRisingWaveOverload(err, res)) return;
     res.status(500).json({ error: "Failed to get unread counts" });
   }
 });
@@ -1592,7 +1593,8 @@ channelRouter.get("/threads/followed", async (req, res) => {
       unread_threads_count: threads.filter((thread) => thread.unreadCount > 0).length,
     });
     res.json({ threads });
-  } catch {
+  } catch (err) {
+    if (respondToRisingWaveOverload(err, res)) return;
     res.status(500).json({ error: "Failed to get followed threads" });
   }
 });

@@ -6875,14 +6875,16 @@ export async function projectJointMessagesToLocalChannel<T extends { channelId: 
   const canonicalThreadIds = [...new Set(msgs.map((message) => message.threadId).filter((threadId): threadId is string => Boolean(threadId)))];
   if (canonicalThreadIds.length === 0) return projectMessagesToChannel(msgs, channelId);
 
+  // One batched lookup for the whole page (was one query per thread id, run
+  // concurrently: 10-20 round trips per message page).
   const threadIdByCanonicalId = new Map<string, string>();
-  await Promise.all(canonicalThreadIds.map(async (canonicalThreadId) => {
-    const projection = (await channelService.getActiveJointThreadProjectionsByCanonicalThread(canonicalThreadId))
-      .find((candidate) => candidate.localServerId === serverId);
-    if (projection) {
-      threadIdByCanonicalId.set(canonicalThreadId, projection.localThreadChannelId);
+  const projections = await channelService.getActiveJointThreadProjectionsByCanonicalThreadsForServer(canonicalThreadIds, serverId);
+  for (const projection of projections) {
+    // Rows come ordered by joined_at; keep the first per canonical Thread, as .find() did.
+    if (!threadIdByCanonicalId.has(projection.canonicalThreadChannelId)) {
+      threadIdByCanonicalId.set(projection.canonicalThreadChannelId, projection.localThreadChannelId);
     }
-  }));
+  }
 
   return msgs.map((message) => ({
     ...message,

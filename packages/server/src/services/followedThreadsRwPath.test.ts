@@ -1,11 +1,11 @@
-// The active followed-threads list served from rw_followed_threads_v4 (072)
+// The active followed-threads list served from rw_followed_threads_v5 (072)
 // must be indistinguishable from the legacy all-Postgres list. On PGlite the
 // global setup installs the Postgres reference for the view
 // (src/test/risingWaveReadReference.ts: followedThreadRows), so every case here
 // compares the RW path against forceLegacyPath on the same data.
 import { dbTest as test } from "../test/integration/dbTest";
 import assert from "node:assert/strict";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { BasicTracer, MemoryTraceSink, type TraceAttributes } from "@botiverse/raft-shared";
 import type { Database } from "../db/index";
 import {
@@ -180,7 +180,7 @@ test("RW path equals the legacy path: replies, unread, task with an agent claima
   assert.equal(rw[2]!.latestActivitySeq, String(t2.parent.seq));
 
   const selected = eventAttrs(events, "followed_threads.source_selected");
-  assert.equal(selected?.followed_threads_source, "rw_v4");
+  assert.equal(selected?.followed_threads_source, "rw_v5");
   assert.equal(selected?.followed_threads_count, 3);
   assert.equal(selected?.rw_rows_count, 5, "the view carries every follow state");
   assert.equal(selected?.rw_regular_threads, 3);
@@ -230,7 +230,7 @@ test("RW path visibility: private parent for members only, archived parent and d
   assert.deepEqual(peerRw.map((t) => t.threadChannelId), [hiddenPrivate.thread.id]);
 });
 
-test("a followed thread missing from RW (CDC lag) is served by the legacy query with identical fields", async ({ seed, db }) => {
+test("followed threads missing from RW (CDC lag) are left out and counted, not filled in from Postgres", async ({ seed, db }) => {
   const owner = await seed.human();
   const peer = await seed.human();
   const server = await seed.server({ owner, members: [peer] });
@@ -259,18 +259,14 @@ test("a followed thread missing from RW (CDC lag) is served by the legacy query 
     },
   });
   const { result: rw, events } = await traced((traceQuery) => getFollowedThreads(server.id, owner.id, undefined, { traceQuery }));
-  assert.deepEqual(byThread(rw), byThread(legacy));
-  assert.equal(rw.length, 3);
+  // Same as the legacy path for the thread RW has; the two lagging ones are absent.
+  assert.deepEqual(byThread(rw), byThread(legacy.filter((t) => t.threadChannelId === present.thread.id)));
+  assert.equal(rw.length, 1);
   const selected = eventAttrs(events, "followed_threads.source_selected");
-  assert.equal(selected?.followed_threads_source, "rw_v4");
+  assert.equal(selected?.followed_threads_source, "rw_v5");
   assert.equal(selected?.rw_missing_threads, 2);
-  assert.equal(selected?.legacy_regular_threads, 2);
   assert.equal(selected?.rw_regular_threads, 1);
-  const listQuery = events.find((event) => event.attrs?.query_name === "channels.followed_threads_by_user");
-  assert.equal(listQuery?.attrs?.thread_ids_filter_count, 2, "the legacy list is restricted to the missing threads");
-  // The missing threads keep the traced authority read-state query.
-  const readState = events.find((event) => event.attrs?.query_name === "channels.read_state_by_channels");
-  assert.equal(readState?.attrs?.read_state_authority_rows_count, 2);
+  assert.equal(events.find((event) => event.attrs?.query_name === "channels.followed_threads_by_user"), undefined, "no Postgres list query for the missing threads");
 });
 
 test("a failed RW read runs the whole legacy path and never surfaces the error", async ({ seed, db }) => {
@@ -286,7 +282,7 @@ test("a failed RW read runs the whole legacy path and never surfaces the error",
   withReadSource({
     ...referenceActivityReadSource,
     async followedThreadRows() {
-      throw new Error('relation "rw_followed_threads_v4" does not exist');
+      throw new Error('relation "rw_followed_threads_v5" does not exist');
     },
   });
   const { result, events } = await traced((traceQuery) => getFollowedThreads(server.id, owner.id, undefined, { traceQuery }));
@@ -298,7 +294,7 @@ test("a failed RW read runs the whole legacy path and never surfaces the error",
   assert.ok(queryNames(events).includes("channels.followed_threads_by_user"));
 });
 
-test("the RW read: one rw_followed_threads_v4 lookup on (server, user), traced as a RisingWave query", async ({ seed, db }) => {
+test("the RW read: one rw_followed_threads_v5 lookup on (server, user), traced as a RisingWave query", async ({ seed, db }) => {
   const owner = await seed.human();
   const peer = await seed.human();
   const server = await seed.server({ owner, members: [peer] });
@@ -322,17 +318,17 @@ test("the RW read: one rw_followed_threads_v4 lookup on (server, user), traced a
   assert.deepEqual(result, legacy);
   assert.equal(rwCalls.length, 1);
   assert.equal(rwCalls[0]!.text, RISINGWAVE_FOLLOWED_THREADS_ROWS_SQL);
-  assert.match(rwCalls[0]!.text, /FROM rw_followed_threads_v4 v\s+WHERE v\.server_id = \$1\s+AND v\.user_id = \$2/);
+  assert.match(rwCalls[0]!.text, /FROM rw_followed_threads_v5 v\s+WHERE v\.server_id = \$1\s+AND v\.user_id = \$2/);
   assert.deepEqual(rwCalls[0]!.values, [server.id, owner.id]);
   const rwQuery = events.find((event) => event.attrs?.query_name === "channels.followed_threads_rw_rows");
   assert.equal(rwQuery?.attrs?.backend, "risingwave");
   assert.equal(rwQuery?.attrs?.db_system, "risingwave");
-  assert.equal(rwQuery?.attrs?.rw_followed_threads_view, "rw_followed_threads_v4");
+  assert.equal(rwQuery?.attrs?.rw_followed_threads_view, "rw_followed_threads_v5");
   assert.equal(rwQuery?.attrs?.rows_count, 1);
   assert.equal(rwQuery?.attrs?.["rw.acquire_wait_ms"], 3);
 });
 
-test("a joint thread is still served by the joint query on the RW path", async ({ seed, db }) => {
+test("a joint thread is served from rw_followed_threads_v5 with the local joint parent, without the Postgres joint query", async ({ seed, db }) => {
   const owner = await seed.human();
   const sender = await seed.human();
   const receiverServer = await seed.server({ owner });
@@ -379,9 +375,24 @@ test("a joint thread is still served by the joint query on the RW path", async (
   assert.equal(jointRow.parentChannelId, receiverLocal.id);
   assert.equal(jointRow.replyCount, 1);
   const selected = eventAttrs(events, "followed_threads.source_selected");
-  assert.equal(selected?.rw_non_regular_threads, 1);
+  assert.equal(selected?.rw_non_regular_threads, 0);
   assert.equal(selected?.joint_threads, 1);
-  assert.equal(selected?.rw_regular_threads, 1);
+  assert.equal(selected?.rw_regular_threads, 2, "the joint projection is served like a regular thread");
+  assert.ok(!queryNames(events).includes("channels.followed_joint_threads_by_user"), "no Postgres joint query on the RW path");
+
+  // Not a member of the local joint channel: hidden on both paths (the joint
+  // query's parent_member rule). Archived local joint channel: hidden too.
+  await db.delete(channelHumans).where(and(eq(channelHumans.channelId, receiverLocal.id), eq(channelHumans.userId, owner.id)));
+  const legacyNonMember = await getFollowedThreads(receiverServer.id, owner.id, undefined, { forceLegacyPath: true });
+  const rwNonMember = await getFollowedThreads(receiverServer.id, owner.id);
+  assert.deepEqual(byThread(rwNonMember), byThread(legacyNonMember));
+  assert.equal(rwNonMember.some((t) => t.threadChannelId === localThread.id), false);
+  await db.insert(channelHumans).values({ channelId: receiverLocal.id, userId: owner.id });
+  await db.update(channels).set({ archivedAt: new Date() }).where(eq(channels.id, receiverLocal.id));
+  const legacyArchived = await getFollowedThreads(receiverServer.id, owner.id, undefined, { forceLegacyPath: true });
+  const rwArchived = await getFollowedThreads(receiverServer.id, owner.id);
+  assert.deepEqual(byThread(rwArchived), byThread(legacyArchived));
+  assert.equal(rwArchived.some((t) => t.threadChannelId === localThread.id), false);
 });
 
 test("guests, other states, search, channel filter and row caps take the legacy path", async ({ seed, db }) => {
@@ -400,7 +411,7 @@ test("guests, other states, search, channel filter and row caps take the legacy 
     return selected?.followed_threads_source === "legacy" ? selected.legacy_reason : selected?.followed_threads_source;
   };
   assert.equal(await reasonOf(guest.id), "guest");
-  assert.equal(await reasonOf(owner.id), "rw_v4");
+  assert.equal(await reasonOf(owner.id), "rw_v5");
   assert.equal(await reasonOf(owner.id, { state: "done" }), "state");
   assert.equal(await reasonOf(owner.id, { state: "unfollowed_active" }), "state");
   assert.equal(await reasonOf(owner.id, { q: "parent" }), "search");

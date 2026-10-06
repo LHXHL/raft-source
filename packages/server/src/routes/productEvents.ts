@@ -1,6 +1,6 @@
 import { Router, type Router as RouterType } from "express";
 import { getDb } from "../db/index";
-import { resolveProductAnalyticsGate } from "../services/productAnalyticsGate";
+import { legacyProductEventsAllowed, resolveProductAnalyticsGate } from "../services/productAnalyticsGate";
 import {
   buildClientEventRows,
   clientEventBatchSchema,
@@ -91,6 +91,13 @@ productEventsRouter.post("/onboarding-wizard", async (req, res) => {
     }
 
     const idempotencyKey = shortField(body.idempotencyKey, 128);
+
+    // RFC-067 controls: an explicit "no" (workspace switch off, or the user
+    // turned "Share usage data" off) means nothing is recorded.
+    if (!(await legacyProductEventsAllowed(getDb(), { userId: req.userId!, serverId: req.serverId! }))) {
+      res.status(204).end();
+      return;
+    }
 
     await productEventsService.recordOnboardingWizardEvent({
       serverId: req.serverId!,

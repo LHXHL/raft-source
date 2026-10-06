@@ -167,10 +167,11 @@ export async function waitForRealRwFixture(
       expected: 2,
     },
     {
-      label: "rw_followed_threads_v4 (followed thread with its parent)",
-      sql: `SELECT count(*) AS n FROM rw_followed_threads_v4
+      label: "rw_followed_threads_v5 (followed thread with its parent)",
+      sql: `SELECT count(*) AS n FROM rw_followed_threads_v5
             WHERE server_id = $1 AND user_id = $2 AND thread_channel_id = $3
-              AND reply_count = 1 AND parent_message_id = $4 AND parent_server_id = $1`,
+              AND reply_count = 1 AND parent_message_id = $4 AND parent_server_id = $1
+              AND NOT joint_projection AND joint_parent_channel_id IS NULL`,
       values: [f.receiverServer.id, f.receiver.id, f.thread.id, f.generalMessage.id],
       expected: 1,
     },

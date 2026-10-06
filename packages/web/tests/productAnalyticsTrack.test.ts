@@ -87,7 +87,9 @@ test("events go out only after the server says this user may send them", () => w
     "pwa_install_cta_clicked",
   ]);
   assert.equal(new Set(body.events.map((event) => event.uuid)).size, body.events.length);
-  assert.ok(body.events.every((event) => event.client_session_id.length > 0));
+  // A per-page-load product session id (a uuid), not shared with traces.
+  assert.equal(new Set(body.events.map((event) => event.client_session_id)).size, 1);
+  assert.match(body.events[0]!.client_session_id, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
   assert.deepEqual(body.events[4]!.properties, {
     platform: "ios_safari",
     surface: "settings",

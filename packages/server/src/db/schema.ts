@@ -106,9 +106,8 @@ export const users = pgTable("users", {
   // The only user identifier traces carry (as `trace_user_id`): random, not
   // derivable from `id`. Traces are kept indefinitely, so retiring or deleting an
   // account rotates this value (never clears it); the old value then matches no
-  // one. Nullable only until existing rows are backfilled
-  // (db:backfill-users-trace-user-id); NOT NULL follows in a later migration.
-  traceUserId: uuid("trace_user_id").defaultRandom(),
+  // one.
+  traceUserId: uuid("trace_user_id").notNull().defaultRandom(),
 }, (table) => [
   uniqueIndex("idx_users_name_exact_unique").on(table.name),
   check(

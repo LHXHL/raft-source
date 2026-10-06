@@ -3054,12 +3054,14 @@ test("resolveCodexSpawn runs the Windows npm entry through a genuine Node host",
   assert.equal(result.env?.ELECTRON_RUN_AS_NODE, undefined);
 });
 
-test("resolveCodexSpawn skips an npm JS entry in a Windows SEA and selects the PATH cmd shim", () => {
+test("resolveCodexSpawn in a Windows SEA runs the PATH wrapper's entry with the wrapper's node, not cmd.exe", () => {
   clearCodexProbeCacheForTests();
   const seaExecutable = String.raw`C:\Program Files\Raft\raft-computer.exe`;
   const globalRoot = String.raw`C:\Users\bot\AppData\Roaming\npm\node_modules`;
   const npmEntry = String.raw`C:\Users\bot\AppData\Roaming\npm\node_modules\@openai\codex\bin\codex.js`;
   const shim = String.raw`C:\Users\bot\AppData\Roaming\npm\codex.cmd`;
+  const pathNode = String.raw`C:\Program Files\nodejs\node.exe`;
+  const shimContent = 'CALL :find_dp0\r\nendLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\node_modules\\@openai\\codex\\bin\\codex.js" %*\r\n';
   const invoked: string[] = [];
 
   const result = resolveCodexSpawn(["app-server", "--listen", "stdio://"], {
@@ -3070,25 +3072,32 @@ test("resolveCodexSpawn skips an npm JS entry in a Windows SEA and selects the P
     execIsSea: true,
     hasNodeRuntime: true,
     existsSyncFn: (candidate) => candidate === npmEntry || candidate === shim,
+    readFileSyncFn: (file) => {
+      assert.equal(file, shim);
+      return shimContent;
+    },
     windowsEnvironmentReaderFn: () => ({}),
     execFileSyncFn: ((command: string, args?: readonly string[]) => {
       invoked.push(command);
       if (command === "npm") return Buffer.from(`${globalRoot}\r\n`);
-      if (command === "powershell.exe") return Buffer.from(`${shim}\r\n`);
+      if (command === "powershell.exe") {
+        return Buffer.from(`${args?.[args.length - 1] === "node" ? pathNode : shim}\r\n`);
+      }
       if (command === seaExecutable) assert.fail("a SEA executable must never be used as the Node host");
-      if (command === shim && args?.[0] === "app-server") {
-        assert.deepEqual(args, ["app-server", "--help"]);
+      if (command === shim) assert.fail("a .cmd wrapper must not be executed");
+      if (command === pathNode && args?.[1] === "app-server") {
+        assert.deepEqual(args, [npmEntry, "app-server", "--help"]);
         return Buffer.from("Usage: codex app-server\r\n");
       }
-      if (command === shim && args?.[0] === "--version") return Buffer.from("codex-cli 0.149.0\r\n");
+      if (command === pathNode && args?.[1] === "--version") return Buffer.from("codex-cli 0.149.0\r\n");
       throw new Error(`unexpected command ${command}`);
     }) as any,
   });
 
   assert.deepEqual(result, {
-    command: shim,
-    args: ["app-server", "--listen", "stdio://"],
-    shell: true,
+    command: pathNode,
+    args: [npmEntry, "app-server", "--listen", "stdio://"],
+    shell: false,
     source: "path",
   });
   assert.ok(!invoked.includes(seaExecutable));
@@ -3169,27 +3178,23 @@ test("probeCodex reports a bounded missing-node-host rejection when a Windows SE
   clearCodexProbeCacheForTests();
 });
 
-test("resolveCodexSpawn uses shell:true on Windows when PATH resolves to a .cmd shim", () => {
+test("resolveCodexSpawn never runs a .cmd wrapper it cannot resolve", () => {
   const shim = "C:\\Users\\test\\AppData\\Local\\npm\\codex.cmd";
-  const result = resolveCodexSpawn(["app-server", "--listen", "stdio://"], {
+  assert.throws(() => resolveCodexSpawn(["app-server", "--listen", "stdio://"], {
     platform: "win32",
+    existsSyncFn: (candidate) => candidate === shim,
+    readFileSyncFn: () => "@echo off\r\npowershell -File \"%SCRIPT_DIR%\\codex.ps1\" %*\r\n",
+    windowsEnvironmentReaderFn: () => ({}),
     execFileSyncFn: ((command: string, args?: readonly string[]) => {
       if (command === "npm") throw new Error("npm install not found");
-      if (command === shim && args?.[0] === "app-server") {
-        assert.deepEqual(args, ["app-server", "--help"]);
-        return Buffer.from("Usage: codex app-server\r\n");
-      }
+      if (command === shim) assert.fail("a .cmd wrapper must not be executed");
       if (command === "powershell.exe") {
         assert.deepEqual(args?.slice(0, 3), ["-NoProfile", "-NonInteractive", "-Command"]);
         return Buffer.from(`${shim}\r\n`);
       }
-      return Buffer.from("");
+      throw new Error(`unexpected command ${command}`);
     }) as any,
-  });
-
-  assert.equal(result.command, shim);
-  assert.deepEqual(result.args, ["app-server", "--listen", "stdio://"]);
-  assert.equal(result.shell, true);
+  }), /batch wrapper rejected: batch_target_unresolved/);
 });
 
 test("resolveCodexSpawn falls back to standard Codex Desktop install path on Windows", () => {

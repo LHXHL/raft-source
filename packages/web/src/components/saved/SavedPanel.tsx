@@ -141,9 +141,9 @@ const SavedItem = memo(function SavedItem({ entry, onOpenEntry, onRemoveMessage,
             onKeyDown={(event) => event.stopPropagation()}
             onClick={handleRemoveButtonClick}
             aria-label={formatMessage({ id: "saved.remove" })}
-            className="data-pressed:text-primary-400 theme-brutal:data-pressed:text-brutal-orange data-pressed:bg-primary-soft/30"
+            className="data-pressed:text-accent-strong theme-brutal:data-pressed:text-brutal-orange data-pressed:bg-accent-soft/30"
           >
-            <Bookmark size={14} fill="currentColor" className="text-primary-400 theme-brutal:text-brutal-orange" aria-hidden />
+            <Bookmark size={14} fill="currentColor" className="text-accent-strong theme-brutal:text-brutal-orange" aria-hidden />
           </PanelToggleAction>
         </div>
       </ContextMenuTrigger>
@@ -253,7 +253,7 @@ export default function SavedPanel({ onOpenEntry, onDragEntry, embedded = false 
           title={formatMessage({ id: "saved.header.title" })}
           subtitle={formatMessage({ id: "saved.header.subtitle" }, { count: savedTotal })}
           icon={<Bookmark size={18} />}
-          iconBg="bg-primary"
+          iconBg="bg-primary-soft"
           onMobileBack={onMobileBack}
         />
       ) : null}

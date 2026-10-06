@@ -423,7 +423,7 @@ test("saved thread origin bookmark renders as the active save action", async () 
   const row = saveButton.closest("#message-message-1");
 
   assert.equal(saveButton.getAttribute("data-active"), "true");
-  assert.match(saveButton.className, /(?:^| )data-active:text-primary-400(?: |$)/);
+  assert.match(saveButton.className, /(?:^| )data-active:text-accent-strong(?: |$)/);
   assert.ok(row);
   assert.equal(
     row.querySelector("[data-message-affordance='saved-indicator']"),

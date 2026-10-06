@@ -77,7 +77,7 @@ export function MessageHoverToolbar({
         onClick={onToggleSave}
         aria-label={isSaved ? formatMessage({ id: "message.messageItem.removeFromSaved" }) : formatMessage({ id: "message.messageItem.saveMessage" })}
         data-message-affordance="bookmark"
-        className={isSaved ? "data-active:text-primary-400 data-active:hover:text-primary-400 theme-brutal:data-active:text-brutal-orange theme-brutal:data-active:hover:text-brutal-orange" : undefined}
+        className={isSaved ? "data-active:text-accent-strong data-active:hover:text-accent-strong theme-brutal:data-active:text-brutal-orange theme-brutal:data-active:hover:text-brutal-orange" : undefined}
       >
         <Bookmark size={13} fill={isSaved ? "currentColor" : "none"} />
       </MessageItemToolbarButton>

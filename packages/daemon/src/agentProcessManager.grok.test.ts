@@ -16,6 +16,7 @@ import { installDaemonFetchMockForTests } from "./daemonFetch";
 import { GrokDriver } from "./drivers/grok";
 import type { SpawnContext, SpawnResult } from "./drivers/types";
 import { traceRows } from "./testing/traceRows";
+import { releaseAgentManagerForTests } from "./testing/agentManagerTeardown";
 
 class FakeGrokChildProcess extends EventEmitter {
   stdout = new EventEmitter();
@@ -115,24 +116,6 @@ async function waitFor(condition: () => boolean, label: string): Promise<void> {
     await flush();
   }
   assert.fail(`Timed out waiting for ${label}`);
-}
-
-function clearManagerForTest(manager: AgentProcessManager): void {
-  if ((manager as any).agentStartPumpTimer) clearTimeout((manager as any).agentStartPumpTimer);
-  for (const ap of (manager as any).agents?.values?.() ?? []) {
-    ap.notifications.clearTimer();
-    if (ap.pendingTrajectory?.timer) clearTimeout(ap.pendingTrajectory.timer);
-    if (ap.activityHeartbeat?.kind === "active") clearInterval(ap.activityHeartbeat.timer);
-    if (ap.startup?.kind === "waiting" && ap.startup.timer) clearTimeout(ap.startup.timer);
-    if (ap.exit?.kind === "live" && ap.exit.stalledRecoverySigtermTimer) {
-      clearTimeout(ap.exit.stalledRecoverySigtermTimer);
-    }
-    if (ap.compaction?.kind === "active" && ap.compaction.watchdog) clearTimeout(ap.compaction.watchdog);
-    if (ap.runtimeErrorDeliveryBackoff?.kind === "backing_off" && ap.runtimeErrorDeliveryBackoff.timer) {
-      clearTimeout(ap.runtimeErrorDeliveryBackoff.timer);
-    }
-  }
-  (manager as any).agents?.clear?.();
 }
 
 function installManagedRunnerMintFetch(): () => void {
@@ -393,7 +376,7 @@ test("grok interaction lifecycle stays out of Activity and late completion canno
       ],
     );
   } finally {
-    clearManagerForTest(manager);
+    await releaseAgentManagerForTests(manager);
     rmSync(dataDir, { recursive: true, force: true });
   }
 });
@@ -452,7 +435,7 @@ test("grok autonomous successor terminal restores Idle after background progress
     assert.equal(ap.lastActivityDetail, "Idle");
     assert.equal(ap.activityHeartbeat.kind, "inactive");
   } finally {
-    clearManagerForTest(manager);
+    await releaseAgentManagerForTests(manager);
     rmSync(dataDir, { recursive: true, force: true });
   }
 });
@@ -576,7 +559,7 @@ test("grok response-first late concrete output cannot strand the next inbound be
       "a successful active-turn interject must not enter the closed-turn fallback",
     );
   } finally {
-    clearManagerForTest(manager);
+    await releaseAgentManagerForTests(manager);
     rmSync(dataDir, { recursive: true, force: true });
   }
 });
@@ -660,7 +643,7 @@ test("grok closed native turn flushes ordered notification debt once through idl
     assert.equal(ap.notifications.pendingCount, 0);
     assert.equal(driver.encodedCalls.length, 2);
   } finally {
-    clearManagerForTest(manager);
+    await releaseAgentManagerForTests(manager);
     rmSync(dataDir, { recursive: true, force: true });
   }
 });
@@ -711,7 +694,7 @@ test("grok notification timer debt that observes idle flushes as one idle prompt
     assert.equal(flushOutcome?.attrs?.outcome, "written_idle");
     assert.equal(typeof flushOutcome?.attrs?.pending_age_ms_bucket, "string");
   } finally {
-    clearManagerForTest(manager);
+    await releaseAgentManagerForTests(manager);
     rmSync(dataDir, { recursive: true, force: true });
   }
 });
@@ -766,7 +749,7 @@ test("grok pending inbox debt survives a clean Grok subprocess restart in origin
     assert.match(driver.encodedCalls[1]?.text ?? "", /2 unread messages/);
     assert.doesNotMatch(driver.encodedCalls[1]?.text ?? "", /first restart debt|second restart debt/);
   } finally {
-    clearManagerForTest(manager);
+    await releaseAgentManagerForTests(manager);
     restoreFetch();
     rmSync(dataDir, { recursive: true, force: true });
   }
